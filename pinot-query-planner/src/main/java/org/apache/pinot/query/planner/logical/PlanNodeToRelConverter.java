@@ -74,13 +74,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 
-/**
- * Converts a {@link PlanNode} into a {@link RelNode}.
- *
- * This class is used to convert serialized plan nodes into RelNodes so they can be used when explain with
- * implementation is requested. Therefore some nodes may be transformed in a way that loses information that is
- * required to create an actual executable plan but not necessary in order to describe the plan.
- */
+/// Converts a [PlanNode] into a [RelNode].
+///
+/// This class is used to convert serialized plan nodes into RelNodes so they can be used when explain with
+/// implementation is requested. Therefore some nodes may be transformed in a way that loses information that is
+/// required to create an actual executable plan but not necessary in order to describe the plan.
 public final class PlanNodeToRelConverter {
   private static final Logger LOGGER = LoggerFactory.getLogger(PlanNodeToRelConverter.class);
 
@@ -175,6 +173,7 @@ public final class PlanNodeToRelConverter {
       return null;
     }
 
+    @Deprecated(forRemoval = true, since = "1.6.0")
     @Override
     public Void visitEnrichedJoin(EnrichedJoinNode node, Void context) {
       visitChildren(node);
@@ -376,7 +375,7 @@ public final class PlanNodeToRelConverter {
 
         Window.Group group =
             new Window.Group(keys, isRow, getWindowBound(node.getLowerBound()), getWindowBound(node.getUpperBound()),
-                RexWindowExclusion.EXCLUDE_NO_OTHER, orderKeys, aggCalls);
+                toRexWindowExclusion(node.getExclude()), orderKeys, aggCalls);
 
         List<RexLiteral> constants =
             node.getConstants().stream().map(constant -> RexExpressionUtils.toRexLiteral(_builder, constant))
@@ -392,6 +391,21 @@ public final class PlanNodeToRelConverter {
             node.getDataSchema(), readAlreadyPushedChildren(node)));
       }
       return null;
+    }
+
+    private static RexWindowExclusion toRexWindowExclusion(WindowNode.WindowExclusion exclude) {
+      switch (exclude) {
+        case NO_OTHERS:
+          return RexWindowExclusion.EXCLUDE_NO_OTHER;
+        case CURRENT_ROW:
+          return RexWindowExclusion.EXCLUDE_CURRENT_ROW;
+        case GROUP:
+          return RexWindowExclusion.EXCLUDE_GROUP;
+        case TIES:
+          return RexWindowExclusion.EXCLUDE_TIES;
+        default:
+          throw new IllegalStateException("Unsupported WindowExclusion: " + exclude);
+      }
     }
 
     private RexWindowBound getWindowBound(int bound) {

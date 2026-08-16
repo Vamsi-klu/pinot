@@ -18,14 +18,10 @@
  */
 package org.apache.pinot.common.metrics;
 
-import io.netty.buffer.PooledByteBufAllocatorMetric;
 import org.apache.pinot.common.Utils;
 
 
-/**
- * Enumeration containing all the gauges exposed by the Pinot server.
- *
- */
+/// Enumeration containing all the gauges exposed by the Pinot server.
 public enum ServerGauge implements AbstractMetrics.Gauge {
   VERSION("version", true),
   DOCUMENT_COUNT("documents", false),
@@ -48,6 +44,14 @@ public enum ServerGauge implements AbstractMetrics.Gauge {
   // Dedup metrics
   DEDUP_PRIMARY_KEYS_COUNT("dedupPrimaryKeysCount", false),
   CONSUMPTION_QUOTA_UTILIZATION("ratio", false),
+  // Server-level consumption rate limiting is server-wide, so these are global gauges (no table/partition
+  // dimension), kept distinct from the per-partition CONSUMPTION_QUOTA_UTILIZATION above.
+  SERVER_CONSUMPTION_QUOTA_UTILIZATION("ratio", true),
+  // Configured consumption rate limits, emitted when the limiter is created or its config changes; the server gauge
+  // is set to -1 when server-level rate limiting is disabled. Units follow the active throttling strategy
+  // (bytes/sec in byte mode, messages/sec in message mode).
+  SERVER_CONSUMPTION_RATE_LIMIT("perSecond", true),
+  CONSUMPTION_RATE_LIMIT("perSecond", false),
   JVM_HEAP_USED_BYTES("bytes", true),
   NETTY_POOLED_USED_DIRECT_MEMORY("bytes", true),
   NETTY_POOLED_USED_HEAP_MEMORY("bytes", true),
@@ -70,19 +74,13 @@ public enum ServerGauge implements AbstractMetrics.Gauge {
   SEGMENT_STARTREE_PREPROCESS_COUNT("segmentStartreePreprocessCount", true),
   SEGMENT_MULTI_COL_TEXT_INDEX_PREPROCESS_COUNT("segmentMultiColTextIndexPreprocessCount", true),
 
-  /**
-   * The size of the small cache.
-   * See {@link PooledByteBufAllocatorMetric#smallCacheSize()}
-   */
+  /// The size of the small cache.
+  /// See [io.netty.buffer.PooledByteBufAllocatorMetric#smallCacheSize()]
   NETTY_POOLED_CACHE_SIZE_SMALL("bytes", true),
-  /**
-   * The size of the normal cache.
-   * See {@link PooledByteBufAllocatorMetric#normalCacheSize()}
-   */
+  /// The size of the normal cache.
+  /// See [io.netty.buffer.PooledByteBufAllocatorMetric#normalCacheSize()]
   NETTY_POOLED_CACHE_SIZE_NORMAL("bytes", true),
-  /**
-   * The cache size used by the allocator for normal arenas
-   */
+  /// The cache size used by the allocator for normal arenas
   NETTY_POOLED_THREADLOCALCACHE("bytes", true),
   NETTY_POOLED_CHUNK_SIZE("bytes", true),
   LUCENE_INDEXING_DELAY_MS("milliseconds", false),
@@ -199,11 +197,9 @@ public enum ServerGauge implements AbstractMetrics.Gauge {
     return _unit;
   }
 
-  /**
-   * Returns true if the gauge is global (not attached to a particular resource)
-   *
-   * @return true if the gauge is global
-   */
+  /// Returns true if the gauge is global (not attached to a particular resource)
+  ///
+  /// @return true if the gauge is global
   @Override
   public boolean isGlobal() {
     return _global;
