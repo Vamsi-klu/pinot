@@ -1001,22 +1001,44 @@ public class PinotLLCRealtimeSegmentManagerTest {
         segmentManager._tableConfig);
 
     String consumingSegment = markOneReplicaOffline(segmentManager, 0);
-    String[] capturedPartitions = new String[1];
+    String[] capturedSegments = new String[1];
     doAnswer(invocation -> {
-      capturedPartitions[0] = invocation.getArgument(1);
+      capturedSegments[0] = invocation.getArgument(2);
       return Set.of(consumingSegment);
-    }).when(segmentManager).forceCommit(eq(REALTIME_TABLE_NAME), any(), isNull(), isNull());
+    }).when(segmentManager).forceCommit(eq(REALTIME_TABLE_NAME), isNull(), any(), isNull());
 
     segmentManager.ensureAllPartitionsConsuming();
 
-    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
-    assertEquals(capturedPartitions[0], "0");
+    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), isNull(), eq(consumingSegment), isNull());
+    assertEquals(capturedSegments[0], consumingSegment);
     Map<String, String> instanceStateMap =
         segmentManager._idealState.getRecord().getMapFields().get(consumingSegment);
     assertTrue(instanceStateMap.containsValue(SegmentStateModel.OFFLINE));
 
     segmentManager.ensureAllPartitionsConsuming();
-    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), isNull(), eq(consumingSegment), isNull());
+  }
+
+  @Test
+  public void testAutoForceCommitFailsWhenQueuedSegmentIsNoLongerConsuming() {
+    PinotHelixResourceManager mockHelixResourceManager = mock(PinotHelixResourceManager.class);
+    FakePinotLLCRealtimeSegmentManager segmentManager =
+        spy(new FakePinotLLCRealtimeSegmentManager(mockHelixResourceManager, true, true, 0L));
+    setUpNewTable(segmentManager, 2, 4, 1);
+    when(segmentManager._mockResourceManager.getTableConfig(REALTIME_TABLE_NAME)).thenReturn(
+        segmentManager._tableConfig);
+
+    String consumingSegment = markOneReplicaOffline(segmentManager, 0);
+    String successor = new LLCSegmentName(RAW_TABLE_NAME, 0, 1, CURRENT_TIME_MS).getSegmentName();
+    doAnswer(invocation -> Set.of(successor)).when(segmentManager)
+        .forceCommit(eq(REALTIME_TABLE_NAME), isNull(), eq(consumingSegment), isNull());
+
+    segmentManager.ensureAllPartitionsConsuming();
+
+    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), isNull(), eq(consumingSegment), isNull());
+    assertFalse(segmentManager.isAutoForceCommitRequested(consumingSegment));
+    assertEquals(new HashSet<>(segmentManager._idealState.getRecord().getMapFields().get(consumingSegment).values()),
+        Set.of(SegmentStateModel.CONSUMING));
   }
 
   @Test
@@ -1112,15 +1134,15 @@ public class PinotLLCRealtimeSegmentManagerTest {
 
     String consumingSegment = markOneReplicaOffline(segmentManager, 0);
     doThrow(new IllegalStateException("Force commit disabled for table")).when(segmentManager)
-        .forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+        .forceCommit(eq(REALTIME_TABLE_NAME), isNull(), eq(consumingSegment), isNull());
 
     segmentManager.ensureAllPartitionsConsuming();
-    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), isNull(), eq(consumingSegment), isNull());
     assertTrue(segmentManager._idealState.getRecord().getMapFields().get(consumingSegment)
         .containsValue(SegmentStateModel.OFFLINE));
 
     segmentManager.ensureAllPartitionsConsuming();
-    verify(segmentManager, times(2)).forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+    verify(segmentManager, times(2)).forceCommit(eq(REALTIME_TABLE_NAME), isNull(), eq(consumingSegment), isNull());
   }
 
   @Test
@@ -1134,11 +1156,11 @@ public class PinotLLCRealtimeSegmentManagerTest {
 
     String consumingSegment = markOneReplicaOffline(segmentManager, 0);
     doThrow(new IllegalStateException("Force commit disabled for table")).when(segmentManager)
-        .forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+        .forceCommit(eq(REALTIME_TABLE_NAME), isNull(), eq(consumingSegment), isNull());
 
     segmentManager.ensureAllPartitionsConsuming();
 
-    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), isNull(), eq(consumingSegment), isNull());
     assertEquals(new HashSet<>(segmentManager._idealState.getRecord().getMapFields().get(consumingSegment).values()),
         Set.of(SegmentStateModel.CONSUMING));
   }
@@ -1155,11 +1177,11 @@ public class PinotLLCRealtimeSegmentManagerTest {
     String consumingSegment = markOneReplicaOffline(segmentManager, 0);
     segmentManager._segmentZKMetadataMap.get(consumingSegment).setSizeThresholdToFlushSegment(0);
     doAnswer(invocation -> Set.of(consumingSegment)).when(segmentManager)
-        .forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+        .forceCommit(eq(REALTIME_TABLE_NAME), isNull(), eq(consumingSegment), isNull());
 
     segmentManager.ensureAllPartitionsConsuming();
 
-    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), isNull(), eq(consumingSegment), isNull());
   }
 
   @Test
@@ -1180,11 +1202,11 @@ public class PinotLLCRealtimeSegmentManagerTest {
 
     String consumingSegment = markOneReplicaOffline(segmentManager, 0);
     doAnswer(invocation -> Set.of(consumingSegment)).when(segmentManager)
-        .forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+        .forceCommit(eq(REALTIME_TABLE_NAME), isNull(), eq(consumingSegment), isNull());
 
     segmentManager.ensureAllPartitionsConsuming();
 
-    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), isNull(), eq(consumingSegment), isNull());
     assertFalse(segmentManager.isAutoForceCommitRequested(oldestSegment));
     assertTrue(segmentManager.getAutoForceCommitRequestedCount() <= 10_000);
     assertTrue(segmentManager.isAutoForceCommitRequested(consumingSegment));
@@ -1221,11 +1243,11 @@ public class PinotLLCRealtimeSegmentManagerTest {
     String consumingSegment = markOneReplicaOffline(segmentManager, 0);
     segmentManager.addAutoForceCommitRequested(consumingSegment, CURRENT_TIME_MS - TimeUnit.MINUTES.toMillis(10));
     doAnswer(invocation -> Set.of(consumingSegment)).when(segmentManager)
-        .forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+        .forceCommit(eq(REALTIME_TABLE_NAME), isNull(), eq(consumingSegment), isNull());
 
     segmentManager.ensureAllPartitionsConsuming();
 
-    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), isNull(), eq(consumingSegment), isNull());
   }
 
   @Test
@@ -1273,11 +1295,11 @@ public class PinotLLCRealtimeSegmentManagerTest {
 
     String consumingSegment = markOneReplicaOffline(segmentManager, 0);
     doAnswer(invocation -> Set.of(consumingSegment)).when(segmentManager)
-        .forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+        .forceCommit(eq(REALTIME_TABLE_NAME), isNull(), eq(consumingSegment), isNull());
 
     segmentManager.ensureAllPartitionsConsuming();
 
-    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), isNull(), eq(consumingSegment), isNull());
     assertTrue(segmentManager._idealState.getRecord().getMapFields().get(consumingSegment)
         .containsValue(SegmentStateModel.OFFLINE));
   }
@@ -1310,10 +1332,10 @@ public class PinotLLCRealtimeSegmentManagerTest {
 
     String consumingSegment = markOneReplicaOffline(segmentManager, 0);
     doAnswer(invocation -> Set.of(consumingSegment)).when(segmentManager)
-        .forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+        .forceCommit(eq(REALTIME_TABLE_NAME), isNull(), eq(consumingSegment), isNull());
 
     segmentManager.ensureAllPartitionsConsuming();
-    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), isNull(), eq(consumingSegment), isNull());
 
     Map<String, String> instanceStateMap =
         segmentManager._idealState.getRecord().getMapFields().get(consumingSegment);
@@ -1331,7 +1353,7 @@ public class PinotLLCRealtimeSegmentManagerTest {
     }
 
     segmentManager.ensureAllPartitionsConsuming();
-    verify(segmentManager, times(2)).forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+    verify(segmentManager, times(2)).forceCommit(eq(REALTIME_TABLE_NAME), isNull(), eq(consumingSegment), isNull());
   }
 
   private String markOneReplicaOffline(FakePinotLLCRealtimeSegmentManager segmentManager, int partitionId) {

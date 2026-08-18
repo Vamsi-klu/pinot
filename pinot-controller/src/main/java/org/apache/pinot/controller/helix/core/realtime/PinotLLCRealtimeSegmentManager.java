@@ -2080,7 +2080,7 @@ public class PinotLLCRealtimeSegmentManager implements PinotClusterConfigChangeL
         segmentAssignment, instancePartitionsMap);
   }
 
-  /// Queue a partition-scoped force-commit for mixed CONSUMING + OFFLINE IdealState while ZK status is IN_PROGRESS
+  /// Queue a segment-targeted force-commit for mixed CONSUMING + OFFLINE IdealState while ZK status is IN_PROGRESS
   /// (issue #15897). Does not send Helix messages — the caller must run
   /// {@link #executePendingAutoForceCommits(List)} after the IdealState write. Age is a proxy for progress, not a
   /// row-count check; a nearly empty CONSUMING replica can still be sealed once minAgeMs has elapsed.
@@ -2093,6 +2093,7 @@ public class PinotLLCRealtimeSegmentManager implements PinotClusterConfigChangeL
       List<AutoForceCommitRequest> pendingAutoForceCommits) {
     Long requestedAtMs = _autoForceCommitRequestedAtMs.get(segmentName);
     if (requestedAtMs != null) {
+      // Lease is at least DEFAULT_AUTO_FORCE_COMMIT_LEASE_MS; raising minAgeMs also stretches this window.
       long leaseMs = Math.max(_autoForceCommitOnPartialOfflineMinAgeMs, DEFAULT_AUTO_FORCE_COMMIT_LEASE_MS);
       if (currentTimeMs - requestedAtMs < leaseMs) {
         LOGGER.debug("Skipping auto force-commit for segment: {} of table: {} — already requested", segmentName,
@@ -2100,7 +2101,10 @@ public class PinotLLCRealtimeSegmentManager implements PinotClusterConfigChangeL
         _controllerMetrics.addMeteredTableValue(realtimeTableName, ControllerMeter.LLC_AUTO_FORCE_COMMIT_SKIPPED, 1L);
         return true;
       }
-      _autoForceCommitRequestedAtMs.remove(segmentName);
+      if (!_autoForceCommitRequestedAtMs.remove(segmentName, requestedAtMs)) {
+        // Another tick refreshed the lease; keep owning this segment.
+        return true;
+      }
       if (_isPartialOfflineReplicaRepairEnabled) {
         // Lease expired and flip is available — do not own this tick so OFFLINE→CONSUMING can run.
         return false;
@@ -2126,7 +2130,7 @@ public class PinotLLCRealtimeSegmentManager implements PinotClusterConfigChangeL
   /// Same allow-check as {@link #validateForceCommitAllowed(String)} but does not throw, so a cluster-wide flag
   /// does not re-queue forever on partial-upsert / drop-OOO tables.
   @VisibleForTesting
-  boolean isAutoForceCommitAllowed(TableConfig tableConfig) {
+  boolean isAutoForceCommitAllowed(@Nullable TableConfig tableConfig) {
     if (tableConfig == null) {
       return false;
     }
@@ -2136,7 +2140,8 @@ public class PinotLLCRealtimeSegmentManager implements PinotClusterConfigChangeL
     return ConsumingSegmentConsistencyModeListener.getInstance().isForceCommitAllowed();
   }
 
-  /// Sends queued partition-scoped force-commits. Adds a segment to the tracking set only after messages are sent.
+  /// Sends queued segment-targeted force-commits. Adds a segment to the tracking set only after messages are sent
+  /// and the return set contains the queued name (a successor on the same partition is treated as failure).
   /// Failed sends are not tracked so a later RSVM tick can retry, or the OFFLINE→CONSUMING flip can run.
   ///
   /// @return requests whose {@code forceCommit} threw
@@ -2148,9 +2153,19 @@ public class PinotLLCRealtimeSegmentManager implements PinotClusterConfigChangeL
     List<AutoForceCommitRequest> failed = new ArrayList<>();
     for (AutoForceCommitRequest request : pendingAutoForceCommits) {
       try {
-        LOGGER.info("Auto force-committing partition: {} segment: {} of table: {} due to partial OFFLINE replicas",
-            request._partitionId, request._segmentName, request._realtimeTableName);
-        forceCommit(request._realtimeTableName, Integer.toString(request._partitionId), null, null);
+        LOGGER.info("Auto force-committing segment: {} of table: {} due to partial OFFLINE replicas",
+            request._segmentName, request._realtimeTableName);
+        // Target the queued segment, not "whatever is CONSUMING on this partition now".
+        Set<String> committed =
+            forceCommit(request._realtimeTableName, null, request._segmentName, null);
+        if (committed == null || !committed.contains(request._segmentName)) {
+          LOGGER.warn("Auto force-commit did not target queued segment: {} of table: {} (committed={})",
+              request._segmentName, request._realtimeTableName, committed);
+          _controllerMetrics.addMeteredTableValue(request._realtimeTableName,
+              ControllerMeter.LLC_AUTO_FORCE_COMMIT_FAILED, 1L);
+          failed.add(request);
+          continue;
+        }
         _autoForceCommitRequestedAtMs.put(request._segmentName, getCurrentTimeMs());
         _controllerMetrics.addMeteredTableValue(request._realtimeTableName,
             ControllerMeter.LLC_AUTO_FORCE_COMMIT_SUCCESS, 1L);
@@ -2190,7 +2205,7 @@ public class PinotLLCRealtimeSegmentManager implements PinotClusterConfigChangeL
   /// without bound across segment generations on a long-lived controller leader.
   @VisibleForTesting
   void pruneAutoForceCommitTracking(String realtimeTableName, Map<String, Map<String, String>> instanceStatesMap) {
-    if (_autoForceCommitRequestedAtMs.isEmpty()) {
+    if (!_isAutoForceCommitOnPartialOfflineEnabled || _autoForceCommitRequestedAtMs.isEmpty()) {
       return;
     }
     String rawTableName = TableNameBuilder.extractRawTableName(realtimeTableName);
@@ -3077,15 +3092,11 @@ public class PinotLLCRealtimeSegmentManager implements PinotClusterConfigChangeL
     if (tableConfig == null) {
       throw new IllegalStateException("Table config not found for table: " + tableNameWithType);
     }
-    // Only restrict force commit for tables with inconsistent state configs
-    // (partial upsert or dropOutOfOrder tables with replication > 1)
-    boolean isInconsistentMetadataDuringConsumption =
-        TableConfigUtils.isTableTypeInconsistentDuringConsumption(tableConfig);
-    ConsumingSegmentConsistencyModeListener configInstance = ConsumingSegmentConsistencyModeListener.getInstance();
-    if (!configInstance.isForceCommitAllowed() && isInconsistentMetadataDuringConsumption) {
+    if (!isAutoForceCommitAllowed(tableConfig)) {
+      ConsumingSegmentConsistencyModeListener configInstance = ConsumingSegmentConsistencyModeListener.getInstance();
       throw new IllegalStateException("Force commit disabled for table: " + tableNameWithType
           + ". Table is configured as partial upsert or dropOutOfOrderRecord=true with replication > 1, "
-          + "which can cause data inconsistency during force commit. " + "Current cluster config '"
+          + "which can cause data inconsistency during force commit. Current cluster config '"
           + configInstance.getConfigKey() + "' is set to: " + configInstance.getConsistencyMode()
           + ". To enable safer force commit, set cluster config '" + configInstance.getConfigKey()
           + "' to 'PROTECTED'.");
