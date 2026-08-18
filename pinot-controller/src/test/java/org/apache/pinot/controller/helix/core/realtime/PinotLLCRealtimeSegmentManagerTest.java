@@ -67,6 +67,7 @@ import org.apache.pinot.common.restlet.resources.TableLLCSegmentUploadResponse;
 import org.apache.pinot.common.utils.FileUploadDownloadClient;
 import org.apache.pinot.common.utils.LLCSegmentName;
 import org.apache.pinot.common.utils.URIUtils;
+import org.apache.pinot.common.utils.helix.HelixHelper;
 import org.apache.pinot.controller.ControllerConf;
 import org.apache.pinot.controller.helix.core.PinotHelixResourceManager;
 import org.apache.pinot.controller.helix.core.assignment.segment.SegmentAssignment;
@@ -1124,12 +1125,13 @@ public class PinotLLCRealtimeSegmentManagerTest {
     segmentManager._replayIdealStateUpdaterOnce = true;
 
     String consumingSegment = markOneReplicaOffline(segmentManager, 0);
-    segmentManager.addAutoForceCommitRequested(consumingSegment, CURRENT_TIME_MS - TimeUnit.MINUTES.toMillis(10));
+    long staleLeaseMs = CURRENT_TIME_MS - TimeUnit.MINUTES.toMillis(10);
+    segmentManager.addAutoForceCommitRequested(consumingSegment, staleLeaseMs);
 
     segmentManager.ensureAllPartitionsConsumingViaPublicPath();
 
     verify(segmentManager, never()).forceCommit(any(), any(), any(), any());
-    assertTrue(segmentManager.isAutoForceCommitRequested(consumingSegment));
+    assertEquals(segmentManager.getAutoForceCommitRequestedAtMs(consumingSegment), CURRENT_TIME_MS);
     assertEquals(new HashSet<>(segmentManager._idealState.getRecord().getMapFields().get(consumingSegment).values()),
         Set.of(SegmentStateModel.CONSUMING));
     assertTrue(segmentManager._idealStateUpdateCount >= 2);
@@ -3074,7 +3076,8 @@ public class PinotLLCRealtimeSegmentManagerTest {
       _idealStateUpdateCount++;
       if (_replayIdealStateUpdaterOnce) {
         _replayIdealStateUpdaterOnce = false;
-        updater.apply(_idealState);
+        // Discard mutations on a clone, matching Helix CAS failure.
+        updater.apply(HelixHelper.cloneIdealState(_idealState));
         _idealStateUpdateCount++;
       }
       IdealState updated = updater.apply(_idealState);
