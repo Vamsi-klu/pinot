@@ -233,8 +233,8 @@ public class ControllerConf extends PinotConfiguration {
         "controller.segment.error.autoReset";
     public static final String ENABLE_PARTIAL_OFFLINE_REPLICA_REPAIR =
         "controller.realtime.segment.partialOfflineReplicaRepairEnabled";
-    // When enabled, RSVM auto force-commits partitions that have mixed CONSUMING+OFFLINE replicas
-    // (issue #15897). Default false — ops must opt in. Distinct from OFFLINE→CONSUMING repair above.
+    // When enabled, RSVM auto force-commits the mixed CONSUMING+OFFLINE segment (issue #15897).
+    // Default false — ops must opt in. Distinct from OFFLINE→CONSUMING repair above.
     public static final String ENABLE_AUTO_FORCE_COMMIT_ON_PARTIAL_OFFLINE =
         "controller.realtime.segment.autoForceCommitOnPartialOfflineEnabled";
     // Minimum segment age before auto force-commit is attempted (proxy for having consumed rows).
