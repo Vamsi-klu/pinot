@@ -2300,6 +2300,7 @@ public class PinotLLCRealtimeSegmentManager implements PinotClusterConfigChangeL
   }
 
   @VisibleForTesting
+  @Nullable
   Long getAutoForceCommitRequestedAtMs(String segmentName) {
     return _autoForceCommitRequestedAtMs.get(segmentName);
   }
