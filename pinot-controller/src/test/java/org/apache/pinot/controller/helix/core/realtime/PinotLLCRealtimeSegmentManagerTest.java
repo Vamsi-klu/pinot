@@ -1143,7 +1143,7 @@ public class PinotLLCRealtimeSegmentManagerTest {
   }
 
   @Test
-  public void testAutoForceCommitSkippedWhenFlushThresholdNotPositive() {
+  public void testAutoForceCommitStillRunsWhenFlushThresholdNotPositive() {
     PinotHelixResourceManager mockHelixResourceManager = mock(PinotHelixResourceManager.class);
     FakePinotLLCRealtimeSegmentManager segmentManager =
         spy(new FakePinotLLCRealtimeSegmentManager(mockHelixResourceManager, false, true, 0L));
@@ -1153,15 +1153,46 @@ public class PinotLLCRealtimeSegmentManagerTest {
 
     String consumingSegment = markOneReplicaOffline(segmentManager, 0);
     segmentManager._segmentZKMetadataMap.get(consumingSegment).setSizeThresholdToFlushSegment(0);
+    doAnswer(invocation -> Set.of(consumingSegment)).when(segmentManager)
+        .forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
 
     segmentManager.ensureAllPartitionsConsuming();
 
-    verify(segmentManager, never()).forceCommit(any(), any(), any(), any());
-    assertTrue(segmentManager._idealState.getRecord().getMapFields().get(consumingSegment)
-        .containsValue(SegmentStateModel.OFFLINE));
+    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+  }
+
+  @Test
+  public void testAutoForceCommitTrackingEvictsMissingTablesThenOldest() {
+    PinotHelixResourceManager mockHelixResourceManager = mock(PinotHelixResourceManager.class);
+    FakePinotLLCRealtimeSegmentManager segmentManager =
+        spy(new FakePinotLLCRealtimeSegmentManager(mockHelixResourceManager, false, true, 0L));
+    setUpNewTable(segmentManager, 2, 4, 1);
+    when(segmentManager.getTableConfig("goneTable_REALTIME")).thenReturn(null);
+    when(segmentManager.getTableConfig(REALTIME_TABLE_NAME)).thenReturn(segmentManager._tableConfig);
+
+    String goneSegment = new LLCSegmentName("goneTable", 0, 0, CURRENT_TIME_MS).getSegmentName();
+    segmentManager.addAutoForceCommitRequested(goneSegment, 1L);
+    segmentManager.evictAutoForceCommitTrackingIfAtCap();
+    assertTrue(segmentManager.isAutoForceCommitRequested(goneSegment));
+
+    for (int i = 0; i < 10_000; i++) {
+      segmentManager.addAutoForceCommitRequested(
+          new LLCSegmentName("otherTable", 0, i, CURRENT_TIME_MS).getSegmentName(), i);
+    }
+    assertEquals(segmentManager.getAutoForceCommitRequestedCount(), 10_001);
+
+    String consumingSegment = markOneReplicaOffline(segmentManager, 0);
+    doAnswer(invocation -> Set.of(consumingSegment)).when(segmentManager)
+        .forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+    when(segmentManager._mockResourceManager.getTableConfig(REALTIME_TABLE_NAME)).thenReturn(
+        segmentManager._tableConfig);
 
     segmentManager.ensureAllPartitionsConsuming();
-    verify(segmentManager, never()).forceCommit(any(), any(), any(), any());
+
+    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+    assertFalse(segmentManager.isAutoForceCommitRequested(goneSegment));
+    assertTrue(segmentManager.getAutoForceCommitRequestedCount() <= 10_000);
+    assertTrue(segmentManager.isAutoForceCommitRequested(consumingSegment));
   }
 
   @Test
