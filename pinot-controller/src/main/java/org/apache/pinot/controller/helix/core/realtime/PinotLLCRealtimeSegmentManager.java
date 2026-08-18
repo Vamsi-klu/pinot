@@ -2107,13 +2107,16 @@ public class PinotLLCRealtimeSegmentManager implements PinotClusterConfigChangeL
         _controllerMetrics.addMeteredTableValue(realtimeTableName, ControllerMeter.LLC_AUTO_FORCE_COMMIT_SKIPPED, 1L);
         return true;
       }
+      if (_isPartialOfflineReplicaRepairEnabled) {
+        // Keep the lease so an overlapping tick cannot send while this tick flips.
+        if (!_autoForceCommitRequestedAtMs.replace(segmentName, requestedAtMs, currentTimeMs)) {
+          return true;
+        }
+        return false;
+      }
       if (!_autoForceCommitRequestedAtMs.remove(segmentName, requestedAtMs)) {
         // Another tick refreshed the lease; keep owning this segment.
         return true;
-      }
-      if (_isPartialOfflineReplicaRepairEnabled) {
-        // Lease expired and flip is available — do not own this tick so OFFLINE→CONSUMING can run.
-        return false;
       }
     }
 
@@ -2261,8 +2264,11 @@ public class PinotLLCRealtimeSegmentManager implements PinotClusterConfigChangeL
           oldestSegment = entry.getKey();
         }
       }
-      if (oldestSegment == null || _autoForceCommitRequestedAtMs.remove(oldestSegment) == null) {
+      if (oldestSegment == null) {
         break;
+      }
+      if (!_autoForceCommitRequestedAtMs.remove(oldestSegment, oldestRequestedAtMs)) {
+        continue;
       }
       LOGGER.warn("Auto force-commit tracking at cap {}; evicted oldest segment: {}",
           MAX_AUTO_FORCE_COMMIT_TRACKED_SEGMENTS, oldestSegment);

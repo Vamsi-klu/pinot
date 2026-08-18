@@ -1306,6 +1306,26 @@ public class PinotLLCRealtimeSegmentManagerTest {
   }
 
   @Test
+  public void testAutoForceCommitCapEvictionDoesNotDropRefreshedLease() {
+    PinotHelixResourceManager mockHelixResourceManager = mock(PinotHelixResourceManager.class);
+    FakePinotLLCRealtimeSegmentManager segmentManager =
+        new FakePinotLLCRealtimeSegmentManager(mockHelixResourceManager, false, true, 0L);
+    String oldestSegment = new LLCSegmentName("otherTable", 0, 0, CURRENT_TIME_MS).getSegmentName();
+    for (int i = 0; i < 10_000; i++) {
+      segmentManager.addAutoForceCommitRequested(
+          new LLCSegmentName("otherTable", 0, i, CURRENT_TIME_MS).getSegmentName(), i);
+    }
+    segmentManager.addAutoForceCommitRequested(oldestSegment, CURRENT_TIME_MS);
+    String nextOldest = new LLCSegmentName("otherTable", 0, 1, CURRENT_TIME_MS).getSegmentName();
+
+    segmentManager.evictAutoForceCommitTrackingIfAtCap();
+
+    assertTrue(segmentManager.isAutoForceCommitRequested(oldestSegment));
+    assertFalse(segmentManager.isAutoForceCommitRequested(nextOldest));
+    assertEquals(segmentManager.getAutoForceCommitRequestedCount(), 10_000);
+  }
+
+  @Test
   public void testAutoForceCommitLeaseExpiryAllowsFlipWhenRepairEnabled() {
     PinotHelixResourceManager mockHelixResourceManager = mock(PinotHelixResourceManager.class);
     FakePinotLLCRealtimeSegmentManager segmentManager =
@@ -1320,6 +1340,7 @@ public class PinotLLCRealtimeSegmentManagerTest {
     segmentManager.ensureAllPartitionsConsuming();
 
     verify(segmentManager, never()).forceCommit(any(), any(), any(), any());
+    assertTrue(segmentManager.isAutoForceCommitRequested(consumingSegment));
     assertEquals(new HashSet<>(segmentManager._idealState.getRecord().getMapFields().get(consumingSegment).values()),
         Set.of(SegmentStateModel.CONSUMING));
   }
