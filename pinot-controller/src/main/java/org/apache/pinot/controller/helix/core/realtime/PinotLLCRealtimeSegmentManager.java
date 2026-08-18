@@ -1508,12 +1508,15 @@ public class PinotLLCRealtimeSegmentManager implements PinotClusterConfigChangeL
 
     String realtimeTableName = tableConfig.getTableName();
     List<AutoForceCommitRequest> pendingAutoForceCommits = new ArrayList<>();
+    List<String> expiredLeaseFlipSegments = new ArrayList<>();
     evictAutoForceCommitTrackingIfAtCap();
+    IdealState updatedIdealState;
     try {
-      updateIdealState(realtimeTableName, idealState -> {
+      updatedIdealState = updateIdealState(realtimeTableName, idealState -> {
         assert idealState != null;
-        // Retries must not accumulate candidates from a failed CAS attempt.
+        // Retries must not accumulate candidates or lease decisions from a failed CAS attempt.
         pendingAutoForceCommits.clear();
+        expiredLeaseFlipSegments.clear();
         boolean isTableEnabled = idealState.isEnabled();
         boolean isTablePaused = isTablePaused(idealState);
         boolean offsetsHaveToChange = offsetCriteria != null;
@@ -1532,18 +1535,20 @@ public class PinotLLCRealtimeSegmentManager implements PinotClusterConfigChangeL
               getNewStreamMetadataList(streamConfigs, currentPartitionGroupConsumptionStatusList, idealState);
           streamConfigs.stream().forEach(streamConfig -> streamConfig.setOffsetCriteria(originalOffsetCriteria));
           return ensureAllPartitionsConsuming(tableConfig, streamConfigs, idealState, streamMetadataList,
-              offsetCriteria, pendingAutoForceCommits);
+              offsetCriteria, pendingAutoForceCommits, expiredLeaseFlipSegments);
         } else {
           LOGGER.info("Skipping LLC segments validation for table: {}, isTableEnabled: {}, isTablePaused: {}",
               realtimeTableName, isTableEnabled, isTablePaused);
-          // Still drop tracking for segments that left CONSUMING while the table was paused/disabled.
-          pruneAutoForceCommitTracking(realtimeTableName, idealState.getRecord().getMapFields());
           return idealState;
         }
       });
     } catch (Exception e) {
       throw new RuntimeException("Failed to update ideal state during ensureAllPartitionsConsuming.", e);
     }
+    if (updatedIdealState != null) {
+      pruneAutoForceCommitTracking(realtimeTableName, updatedIdealState.getRecord().getMapFields());
+    }
+    refreshAutoForceCommitLeases(expiredLeaseFlipSegments);
     List<AutoForceCommitRequest> failedAutoForceCommits = executePendingAutoForceCommits(pendingAutoForceCommits);
     if (!failedAutoForceCommits.isEmpty() && _isPartialOfflineReplicaRepairEnabled) {
       try {
@@ -1813,9 +1818,12 @@ public class PinotLLCRealtimeSegmentManager implements PinotClusterConfigChangeL
       IdealState idealState, List<StreamMetadata> streamMetadataList, OffsetCriteria offsetCriteria) {
     evictAutoForceCommitTrackingIfAtCap();
     List<AutoForceCommitRequest> pendingAutoForceCommits = new ArrayList<>();
+    List<String> expiredLeaseFlipSegments = new ArrayList<>();
     IdealState updated =
         ensureAllPartitionsConsuming(tableConfig, streamConfigs, idealState, streamMetadataList, offsetCriteria,
-            pendingAutoForceCommits);
+            pendingAutoForceCommits, expiredLeaseFlipSegments);
+    pruneAutoForceCommitTracking(tableConfig.getTableName(), updated.getRecord().getMapFields());
+    refreshAutoForceCommitLeases(expiredLeaseFlipSegments);
     List<AutoForceCommitRequest> failedAutoForceCommits = executePendingAutoForceCommits(pendingAutoForceCommits);
     if (_isPartialOfflineReplicaRepairEnabled) {
       for (AutoForceCommitRequest request : failedAutoForceCommits) {
@@ -1828,7 +1836,7 @@ public class PinotLLCRealtimeSegmentManager implements PinotClusterConfigChangeL
   @VisibleForTesting
   IdealState ensureAllPartitionsConsuming(TableConfig tableConfig, List<StreamConfig> streamConfigs,
       IdealState idealState, List<StreamMetadata> streamMetadataList, OffsetCriteria offsetCriteria,
-      List<AutoForceCommitRequest> pendingAutoForceCommits) {
+      List<AutoForceCommitRequest> pendingAutoForceCommits, List<String> expiredLeaseFlipSegments) {
     String realtimeTableName = tableConfig.getTableName();
 
     InstancePartitions instancePartitions = getConsumingInstancePartitions(tableConfig);
@@ -1951,10 +1959,12 @@ public class PinotLLCRealtimeSegmentManager implements PinotClusterConfigChangeL
                   && !isTablePaused(idealState) && !isTopicPaused(idealState, latestSegmentName)) {
                 autoForceCommitTriggered =
                     maybeQueueAutoForceCommitOnPartialOffline(realtimeTableName, partitionId, latestSegmentName,
-                        latestLLCSegmentName, latestSegmentZKMetadata, currentTimeMs, pendingAutoForceCommits);
+                        latestLLCSegmentName, latestSegmentZKMetadata, currentTimeMs, pendingAutoForceCommits,
+                        expiredLeaseFlipSegments);
               }
               // Prefer force-commit when it will run after this updater; otherwise optionally flip.
-              if (!autoForceCommitTriggered && _isPartialOfflineReplicaRepairEnabled) {
+              if (!autoForceCommitTriggered && _isPartialOfflineReplicaRepairEnabled
+                  && !isTablePaused(idealState) && !isTopicPaused(idealState, latestSegmentName)) {
                 LOGGER.info("Repairing segment: {} with {} OFFLINE replicas out of {} total replicas. "
                         + "Setting OFFLINE replicas back to CONSUMING: {}", latestSegmentName, offlineInstances.size(),
                     instanceStateMap.size(), offlineInstances);
@@ -2067,7 +2077,6 @@ public class PinotLLCRealtimeSegmentManager implements PinotClusterConfigChangeL
       }
     }
 
-    pruneAutoForceCommitTracking(realtimeTableName, instanceStatesMap);
     return idealState;
   }
 
@@ -2097,7 +2106,7 @@ public class PinotLLCRealtimeSegmentManager implements PinotClusterConfigChangeL
   @VisibleForTesting
   boolean maybeQueueAutoForceCommitOnPartialOffline(String realtimeTableName, int partitionId, String segmentName,
       LLCSegmentName llcSegmentName, SegmentZKMetadata segmentZKMetadata, long currentTimeMs,
-      List<AutoForceCommitRequest> pendingAutoForceCommits) {
+      List<AutoForceCommitRequest> pendingAutoForceCommits, List<String> expiredLeaseFlipSegments) {
     Long requestedAtMs = _autoForceCommitRequestedAtMs.get(segmentName);
     if (requestedAtMs != null) {
       // Lease is at least DEFAULT_AUTO_FORCE_COMMIT_LEASE_MS; raising minAgeMs also stretches this window.
@@ -2108,15 +2117,9 @@ public class PinotLLCRealtimeSegmentManager implements PinotClusterConfigChangeL
         return true;
       }
       if (_isPartialOfflineReplicaRepairEnabled) {
-        // Keep the lease so an overlapping tick cannot send while this tick flips.
-        if (!_autoForceCommitRequestedAtMs.replace(segmentName, requestedAtMs, currentTimeMs)) {
-          return true;
-        }
+        // Do not mutate the lease here — the IdealState updater may retry. Caller refreshes after a successful write.
+        expiredLeaseFlipSegments.add(segmentName);
         return false;
-      }
-      if (!_autoForceCommitRequestedAtMs.remove(segmentName, requestedAtMs)) {
-        // Another tick refreshed the lease; keep owning this segment.
-        return true;
       }
     }
 
@@ -2249,6 +2252,17 @@ public class PinotLLCRealtimeSegmentManager implements PinotClusterConfigChangeL
       Map<String, String> states = instanceStatesMap.get(segmentName);
       return states == null || !states.containsValue(SegmentStateModel.CONSUMING);
     });
+  }
+
+  /// Refresh leases after a successful IdealState write so a retried updater cannot see a pre-write mutation.
+  private void refreshAutoForceCommitLeases(List<String> segmentNames) {
+    if (segmentNames.isEmpty()) {
+      return;
+    }
+    long now = getCurrentTimeMs();
+    for (String segmentName : segmentNames) {
+      _autoForceCommitRequestedAtMs.put(segmentName, now);
+    }
   }
 
   /// Evicts the oldest tracking entries if at cap. In-memory only — do not read table config / ZK here (this may
