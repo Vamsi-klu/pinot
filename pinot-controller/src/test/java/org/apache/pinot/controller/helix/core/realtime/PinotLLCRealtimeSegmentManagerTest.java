@@ -82,6 +82,7 @@ import org.apache.pinot.spi.config.table.SegmentPartitionConfig;
 import org.apache.pinot.spi.config.table.SegmentsValidationAndRetentionConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.config.table.UpsertConfig;
 import org.apache.pinot.spi.config.table.assignment.InstancePartitionsType;
 import org.apache.pinot.spi.config.table.ingestion.IngestionConfig;
 import org.apache.pinot.spi.config.table.ingestion.StreamIngestionConfig;
@@ -1162,37 +1163,103 @@ public class PinotLLCRealtimeSegmentManagerTest {
   }
 
   @Test
-  public void testAutoForceCommitTrackingEvictsMissingTablesThenOldest() {
+  public void testAutoForceCommitTrackingEvictsOldestAtCap() {
     PinotHelixResourceManager mockHelixResourceManager = mock(PinotHelixResourceManager.class);
     FakePinotLLCRealtimeSegmentManager segmentManager =
         spy(new FakePinotLLCRealtimeSegmentManager(mockHelixResourceManager, false, true, 0L));
     setUpNewTable(segmentManager, 2, 4, 1);
-    when(segmentManager.getTableConfig("goneTable_REALTIME")).thenReturn(null);
-    when(segmentManager.getTableConfig(REALTIME_TABLE_NAME)).thenReturn(segmentManager._tableConfig);
+    when(segmentManager._mockResourceManager.getTableConfig(REALTIME_TABLE_NAME)).thenReturn(
+        segmentManager._tableConfig);
 
-    String goneSegment = new LLCSegmentName("goneTable", 0, 0, CURRENT_TIME_MS).getSegmentName();
-    segmentManager.addAutoForceCommitRequested(goneSegment, 1L);
-    segmentManager.evictAutoForceCommitTrackingIfAtCap();
-    assertTrue(segmentManager.isAutoForceCommitRequested(goneSegment));
-
+    String oldestSegment = new LLCSegmentName("otherTable", 0, 0, CURRENT_TIME_MS).getSegmentName();
     for (int i = 0; i < 10_000; i++) {
       segmentManager.addAutoForceCommitRequested(
           new LLCSegmentName("otherTable", 0, i, CURRENT_TIME_MS).getSegmentName(), i);
     }
-    assertEquals(segmentManager.getAutoForceCommitRequestedCount(), 10_001);
+    assertEquals(segmentManager.getAutoForceCommitRequestedCount(), 10_000);
 
     String consumingSegment = markOneReplicaOffline(segmentManager, 0);
     doAnswer(invocation -> Set.of(consumingSegment)).when(segmentManager)
         .forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
-    when(segmentManager._mockResourceManager.getTableConfig(REALTIME_TABLE_NAME)).thenReturn(
-        segmentManager._tableConfig);
 
     segmentManager.ensureAllPartitionsConsuming();
 
     verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
-    assertFalse(segmentManager.isAutoForceCommitRequested(goneSegment));
+    assertFalse(segmentManager.isAutoForceCommitRequested(oldestSegment));
     assertTrue(segmentManager.getAutoForceCommitRequestedCount() <= 10_000);
     assertTrue(segmentManager.isAutoForceCommitRequested(consumingSegment));
+  }
+
+  @Test
+  public void testAutoForceCommitLeaseExpiryAllowsFlipWhenRepairEnabled() {
+    PinotHelixResourceManager mockHelixResourceManager = mock(PinotHelixResourceManager.class);
+    FakePinotLLCRealtimeSegmentManager segmentManager =
+        spy(new FakePinotLLCRealtimeSegmentManager(mockHelixResourceManager, true, true, 0L));
+    setUpNewTable(segmentManager, 2, 4, 1);
+    when(segmentManager._mockResourceManager.getTableConfig(REALTIME_TABLE_NAME)).thenReturn(
+        segmentManager._tableConfig);
+
+    String consumingSegment = markOneReplicaOffline(segmentManager, 0);
+    segmentManager.addAutoForceCommitRequested(consumingSegment, CURRENT_TIME_MS - TimeUnit.MINUTES.toMillis(10));
+
+    segmentManager.ensureAllPartitionsConsuming();
+
+    verify(segmentManager, never()).forceCommit(any(), any(), any(), any());
+    assertEquals(new HashSet<>(segmentManager._idealState.getRecord().getMapFields().get(consumingSegment).values()),
+        Set.of(SegmentStateModel.CONSUMING));
+  }
+
+  @Test
+  public void testAutoForceCommitLeaseExpiryRetriesWhenRepairDisabled() {
+    PinotHelixResourceManager mockHelixResourceManager = mock(PinotHelixResourceManager.class);
+    FakePinotLLCRealtimeSegmentManager segmentManager =
+        spy(new FakePinotLLCRealtimeSegmentManager(mockHelixResourceManager, false, true, 0L));
+    setUpNewTable(segmentManager, 2, 4, 1);
+    when(segmentManager._mockResourceManager.getTableConfig(REALTIME_TABLE_NAME)).thenReturn(
+        segmentManager._tableConfig);
+
+    String consumingSegment = markOneReplicaOffline(segmentManager, 0);
+    segmentManager.addAutoForceCommitRequested(consumingSegment, CURRENT_TIME_MS - TimeUnit.MINUTES.toMillis(10));
+    doAnswer(invocation -> Set.of(consumingSegment)).when(segmentManager)
+        .forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+
+    segmentManager.ensureAllPartitionsConsuming();
+
+    verify(segmentManager, times(1)).forceCommit(eq(REALTIME_TABLE_NAME), eq("0"), isNull(), isNull());
+  }
+
+  @Test
+  public void testAutoForceCommitSkippedWhenForceCommitForbidden() {
+    PinotHelixResourceManager mockHelixResourceManager = mock(PinotHelixResourceManager.class);
+    FakePinotLLCRealtimeSegmentManager segmentManager =
+        spy(new FakePinotLLCRealtimeSegmentManager(mockHelixResourceManager, false, true, 0L));
+    setUpNewTable(segmentManager, 2, 4, 1);
+    segmentManager._tableConfig.setUpsertConfig(new UpsertConfig(UpsertConfig.Mode.PARTIAL));
+    when(segmentManager._mockResourceManager.getTableConfig(REALTIME_TABLE_NAME)).thenReturn(
+        segmentManager._tableConfig);
+
+    markOneReplicaOffline(segmentManager, 0);
+    segmentManager.ensureAllPartitionsConsuming();
+
+    verify(segmentManager, never()).forceCommit(any(), any(), any(), any());
+  }
+
+  @Test
+  public void testAutoForceCommitForbiddenAllowsFlipWhenRepairEnabled() {
+    PinotHelixResourceManager mockHelixResourceManager = mock(PinotHelixResourceManager.class);
+    FakePinotLLCRealtimeSegmentManager segmentManager =
+        spy(new FakePinotLLCRealtimeSegmentManager(mockHelixResourceManager, true, true, 0L));
+    setUpNewTable(segmentManager, 2, 4, 1);
+    segmentManager._tableConfig.setUpsertConfig(new UpsertConfig(UpsertConfig.Mode.PARTIAL));
+    when(segmentManager._mockResourceManager.getTableConfig(REALTIME_TABLE_NAME)).thenReturn(
+        segmentManager._tableConfig);
+
+    String consumingSegment = markOneReplicaOffline(segmentManager, 0);
+    segmentManager.ensureAllPartitionsConsuming();
+
+    verify(segmentManager, never()).forceCommit(any(), any(), any(), any());
+    assertEquals(new HashSet<>(segmentManager._idealState.getRecord().getMapFields().get(consumingSegment).values()),
+        Set.of(SegmentStateModel.CONSUMING));
   }
 
   @Test
