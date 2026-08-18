@@ -1132,7 +1132,10 @@ public class PinotLLCRealtimeSegmentManagerTest {
         segmentManager._idealState.getRecord().getMapFields().get(consumingSegment);
     instanceStateMap.put(instanceStateMap.keySet().iterator().next(), SegmentStateModel.OFFLINE);
 
-    segmentManager._idealState.getRecord().setSimpleField(PinotLLCRealtimeSegmentManager.IS_TABLE_PAUSED, "true");
+    PauseState pauseState =
+        new PauseState(true, PauseState.ReasonCode.ADMINISTRATIVE, "test", Long.toString(CURRENT_TIME_MS), List.of());
+    segmentManager._idealState.getRecord()
+        .setSimpleField(PinotLLCRealtimeSegmentManager.PAUSE_STATE, pauseState.toJsonString());
 
     segmentManager.ensureAllPartitionsConsuming();
 
