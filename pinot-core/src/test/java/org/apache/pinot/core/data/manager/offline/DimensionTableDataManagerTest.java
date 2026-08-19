@@ -130,7 +130,13 @@ public class DimensionTableDataManagerTest {
   }
 
   private TableConfig getTableConfig(boolean disablePreload, boolean errorOnDuplicatePrimaryKey) {
-    DimensionTableConfig dimensionTableConfig = new DimensionTableConfig(disablePreload, errorOnDuplicatePrimaryKey);
+    return getTableConfig(disablePreload, errorOnDuplicatePrimaryKey, null);
+  }
+
+  private TableConfig getTableConfig(boolean disablePreload, boolean errorOnDuplicatePrimaryKey,
+      Boolean enableUpsert) {
+    DimensionTableConfig dimensionTableConfig =
+        new DimensionTableConfig(disablePreload, errorOnDuplicatePrimaryKey, enableUpsert);
     return new TableConfigBuilder(TableType.OFFLINE)
         .setTableName("dimBaseballTeams")
         .setDimensionTableConfig(dimensionTableConfig)
@@ -403,6 +409,71 @@ public class DimensionTableDataManagerTest {
     InputStream inputStream = new FileInputStream(schemaFile);
     Assert.assertNotNull(inputStream);
     return JsonUtils.inputStreamToObject(inputStream, Schema.class);
+  }
+
+  @Test
+  public void testLookupUpsertOverwritesDuplicatePrimaryKey()
+      throws Exception {
+    TableConfig tableConfig = getTableConfig(false, false, true);
+    Schema schema = getSchema();
+    DimensionTableDataManager tableDataManager = makeTableDataManager(tableConfig, schema);
+    tableDataManager.addSegment(ImmutableSegmentLoader.load(_indexDir, new IndexLoadingConfig(tableConfig, schema),
+        SEGMENT_OPERATIONS_THROTTLER));
+
+    PrimaryKey key = new PrimaryKey(new String[]{"SF"});
+    GenericRow original = tableDataManager.lookupRow(key);
+    assertNotNull(original);
+    assertEquals(original.getValue("teamName"), "San Francisco Giants");
+
+    File updatedCsv = new File(TEMP_DIR, "dimBaseballTeams_updated.csv");
+    FileUtils.write(updatedCsv, "teamID,teamName\nSF,San Francisco Seals\n", java.nio.charset.StandardCharsets.UTF_8);
+    File updatedTableDir = new File(TEMP_DIR, "updatedTable");
+    SegmentGeneratorConfig updatedConfig =
+        SegmentTestUtils.getSegmentGeneratorConfig(updatedCsv, FileFormat.CSV, updatedTableDir, RAW_TABLE_NAME,
+            tableConfig, schema);
+    // Force a later creation time so upsert sort picks this segment last.
+    Thread.sleep(10);
+    SegmentIndexCreationDriver updatedDriver = new SegmentIndexCreationDriverImpl();
+    updatedDriver.init(updatedConfig);
+    updatedDriver.build();
+    File updatedIndexDir = new File(updatedTableDir, updatedDriver.getSegmentName());
+
+    tableDataManager.addSegment(
+        ImmutableSegmentLoader.load(updatedIndexDir, new IndexLoadingConfig(tableConfig, schema),
+            SEGMENT_OPERATIONS_THROTTLER));
+
+    GenericRow upserted = tableDataManager.lookupRow(key);
+    assertNotNull(upserted);
+    assertEquals(upserted.getValue("teamName"), "San Francisco Seals");
+  }
+
+  @Test
+  public void testLookupFirstWinsWhenUpsertDisabled()
+      throws Exception {
+    TableConfig tableConfig = getTableConfig(false, false, false);
+    Schema schema = getSchema();
+    DimensionTableDataManager tableDataManager = makeTableDataManager(tableConfig, schema);
+    tableDataManager.addSegment(ImmutableSegmentLoader.load(_indexDir, new IndexLoadingConfig(tableConfig, schema),
+        SEGMENT_OPERATIONS_THROTTLER));
+
+    File updatedCsv = new File(TEMP_DIR, "dimBaseballTeams_first_wins.csv");
+    FileUtils.write(updatedCsv, "teamID,teamName\nSF,San Francisco Seals\n", java.nio.charset.StandardCharsets.UTF_8);
+    File updatedTableDir = new File(TEMP_DIR, "firstWinsTable");
+    SegmentGeneratorConfig updatedConfig =
+        SegmentTestUtils.getSegmentGeneratorConfig(updatedCsv, FileFormat.CSV, updatedTableDir, RAW_TABLE_NAME,
+            tableConfig, schema);
+    SegmentIndexCreationDriver updatedDriver = new SegmentIndexCreationDriverImpl();
+    updatedDriver.init(updatedConfig);
+    updatedDriver.build();
+    File updatedIndexDir = new File(updatedTableDir, updatedDriver.getSegmentName());
+
+    tableDataManager.addSegment(
+        ImmutableSegmentLoader.load(updatedIndexDir, new IndexLoadingConfig(tableConfig, schema),
+            SEGMENT_OPERATIONS_THROTTLER));
+
+    GenericRow kept = tableDataManager.lookupRow(new PrimaryKey(new String[]{"SF"}));
+    assertNotNull(kept);
+    assertEquals(kept.getValue("teamName"), "San Francisco Giants");
   }
 
   protected static TableConfig createTableConfig(File tableConfigFile)
