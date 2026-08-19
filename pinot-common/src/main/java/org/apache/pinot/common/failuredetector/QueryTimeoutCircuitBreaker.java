@@ -37,6 +37,10 @@ import org.slf4j.LoggerFactory;
  * This helper is opt-in (disabled by default) so mixed-version clusters keep today's
  * connection-only exclusion behavior.
  *
+ * <p>{@link #recordSuccess} is the only reset. After a trip the counter stays at the threshold
+ * so a TCP-only half-open probe from {@link FailureDetector} cannot clear the streak; the next
+ * timeout re-marks immediately until a real query succeeds.
+ *
  * <p>Thread-safe. One instance is shared by all scatter-gather paths on a broker.
  */
 @ThreadSafe
@@ -49,18 +53,26 @@ public class QueryTimeoutCircuitBreaker {
   private final ConcurrentHashMap<String, AtomicInteger> _consecutiveTimeouts = new ConcurrentHashMap<>();
 
   public QueryTimeoutCircuitBreaker(FailureDetector failureDetector, PinotConfiguration config) {
-    _failureDetector = failureDetector;
-    _enabled = config.getProperty(CommonConstants.Broker.FailureDetector.CONFIG_OF_MARK_UNHEALTHY_ON_TIMEOUT,
-        CommonConstants.Broker.FailureDetector.DEFAULT_MARK_UNHEALTHY_ON_TIMEOUT);
-    _threshold = config.getProperty(CommonConstants.Broker.FailureDetector.CONFIG_OF_TIMEOUT_FAILURE_THRESHOLD,
-        CommonConstants.Broker.FailureDetector.DEFAULT_TIMEOUT_FAILURE_THRESHOLD);
+    this(failureDetector, config.getProperty(CommonConstants.Broker.FailureDetector.CONFIG_OF_MARK_UNHEALTHY_ON_TIMEOUT,
+            CommonConstants.Broker.FailureDetector.DEFAULT_MARK_UNHEALTHY_ON_TIMEOUT),
+        config.getProperty(CommonConstants.Broker.FailureDetector.CONFIG_OF_TIMEOUT_FAILURE_THRESHOLD,
+            CommonConstants.Broker.FailureDetector.DEFAULT_TIMEOUT_FAILURE_THRESHOLD));
   }
 
   @VisibleForTesting
-  public QueryTimeoutCircuitBreaker(FailureDetector failureDetector, boolean enabled, int threshold) {
+  QueryTimeoutCircuitBreaker(FailureDetector failureDetector, boolean enabled, int threshold) {
     _failureDetector = failureDetector;
     _enabled = enabled;
-    _threshold = threshold;
+    _threshold = threshold < 1 ? 1 : threshold;
+    if (enabled && threshold < 1) {
+      LOGGER.warn("Invalid timeout failure threshold {}, using 1", threshold);
+    }
+    if (enabled && failureDetector instanceof NoOpFailureDetector) {
+      LOGGER.warn("Query timeout circuit breaker is enabled but failure detector is NO_OP; "
+          + "servers will not be excluded from routing");
+    }
+    LOGGER.info("QueryTimeoutCircuitBreaker enabled={}, threshold={}, detector={}", _enabled, _threshold,
+        failureDetector.getClass().getSimpleName());
   }
 
   public boolean isEnabled() {
@@ -85,11 +97,15 @@ public class QueryTimeoutCircuitBreaker {
     if (!_enabled) {
       return;
     }
-    int timeouts = _consecutiveTimeouts.computeIfAbsent(instanceId, id -> new AtomicInteger()).incrementAndGet();
-    if (timeouts >= _threshold) {
-      LOGGER.warn("Marking server {} unhealthy after {} consecutive query timeouts", instanceId, timeouts);
+    AtomicInteger after = _consecutiveTimeouts.compute(instanceId, (id, count) -> {
+      int next = (count == null ? 0 : count.get()) + 1;
+      return new AtomicInteger(next);
+    });
+    if (after.get() >= _threshold && _consecutiveTimeouts.remove(instanceId, after)) {
+      LOGGER.warn("Marking server {} unhealthy after {} consecutive query timeouts", instanceId, after.get());
       _failureDetector.markServerUnhealthy(instanceId, hostName);
-      _consecutiveTimeouts.remove(instanceId);
+      // Keep a sentinel at the threshold so a TCP-only retry cannot fully reset the streak.
+      _consecutiveTimeouts.putIfAbsent(instanceId, new AtomicInteger(_threshold));
     }
   }
 

@@ -21,9 +21,11 @@ package org.apache.pinot.broker.requesthandler;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Maps;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
@@ -166,9 +168,7 @@ public class SingleConnectionBrokerRequestHandler extends BaseSingleStageBrokerR
       }
     }
     if (timedOut) {
-      for (ServerRoutingInstance server : serversNotResponded) {
-        _timeoutCircuitBreaker.recordTimeout(server.getInstanceId(), server.getHostname());
-      }
+      recordTimeouts(serversNotResponded);
     }
     ScatterResultStats stats = new ScatterResultStats(
         dataTableMap.size() + serversNotResponded.size(), dataTableMap.size(), totalResponseSize);
@@ -291,9 +291,7 @@ public class SingleConnectionBrokerRequestHandler extends BaseSingleStageBrokerR
     }
     if (baseAsyncResponse.getStatus() == QueryResponse.Status.TIMED_OUT
         || materializedViewAsyncResponse.getStatus() == QueryResponse.Status.TIMED_OUT) {
-      for (ServerRoutingInstance server : serversNotResponded) {
-        _timeoutCircuitBreaker.recordTimeout(server.getInstanceId(), server.getHostname());
-      }
+      recordTimeouts(serversNotResponded);
     }
 
     /// On a SPLIT query, base and MV scatter-gathers cover DISJOINT halves of the timeline
@@ -494,6 +492,17 @@ public class SingleConnectionBrokerRequestHandler extends BaseSingleStageBrokerR
   /// `equals()` matches) but with distinct `ServerRoutingInstance` instances — a regular HashMap
   /// would silently overwrite one DataTable with the other and produce under-counted results.
   ///
+  /// Deduplicates by instance id so an MV-split query that times out on both halves of the
+  /// same physical server increments the streak once, not twice.
+  private void recordTimeouts(List<ServerRoutingInstance> servers) {
+    Set<String> seen = new HashSet<>();
+    for (ServerRoutingInstance server : servers) {
+      if (seen.add(server.getInstanceId())) {
+        _timeoutCircuitBreaker.recordTimeout(server.getInstanceId(), server.getHostname());
+      }
+    }
+  }
+
   /// Package-private so the test suite can pin this contract without spinning up a broker.
   @VisibleForTesting
   static Map<ServerRoutingInstance, DataTable> mergeDataTablesByIdentity(

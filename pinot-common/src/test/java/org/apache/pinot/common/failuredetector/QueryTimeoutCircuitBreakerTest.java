@@ -60,7 +60,8 @@ public class QueryTimeoutCircuitBreakerTest {
 
     breaker.recordTimeout(INSTANCE_ID, HOST_NAME);
     assertEquals(_failureDetector._unhealthy, List.of(INSTANCE_ID));
-    assertEquals(breaker.getConsecutiveTimeouts(INSTANCE_ID), 0);
+    // Sentinel stays at the threshold until a real success (not a TCP-only probe).
+    assertEquals(breaker.getConsecutiveTimeouts(INSTANCE_ID), 3);
   }
 
   @Test
@@ -76,6 +77,8 @@ public class QueryTimeoutCircuitBreakerTest {
     assertEquals(_failureDetector._unhealthy, List.of());
     breaker.recordTimeout(INSTANCE_ID, HOST_NAME);
     assertEquals(_failureDetector._unhealthy, List.of(INSTANCE_ID));
+    breaker.recordSuccess(INSTANCE_ID);
+    assertEquals(breaker.getConsecutiveTimeouts(INSTANCE_ID), 0);
   }
 
   @Test
