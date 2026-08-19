@@ -219,6 +219,17 @@ public class SortedGroupByCombineOperatorsTest {
   }
 
   @Test
+  public void testSafeTrimSequentialTreeMergeMatchesPairwise() {
+    String query = "SELECT intColumn, COUNT(*) FROM testTable GROUP BY intColumn ORDER BY intColumn LIMIT 100";
+    GroupByResultsBlock sequential = getSequentialCombineResult(query);
+    GroupByResultsBlock pairwise = getPairWiseCombineResult(query);
+    assertEquals(sequential.getRows().size(), pairwise.getRows().size());
+    for (int i = 0; i < sequential.getRows().size(); i++) {
+      assertEquals(sequential.getRows().get(i), pairwise.getRows().get(i));
+    }
+  }
+
+  @Test
   public void testSafeTrimSequentialOneSegmentOnly() {
     GroupByResultsBlock combineResult = getSequentialCombineResultSingleBlock(
         "SELECT intColumn, COUNT(*) FROM testTable GROUP BY intColumn ORDER BY intColumn LIMIT 100");

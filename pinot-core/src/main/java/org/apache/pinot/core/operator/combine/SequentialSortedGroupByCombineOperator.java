@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.core.operator.combine;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -28,6 +29,7 @@ import org.apache.pinot.core.data.table.Record;
 import org.apache.pinot.core.data.table.SortedRecordTable;
 import org.apache.pinot.core.data.table.SortedRecords;
 import org.apache.pinot.core.data.table.SortedRecordsMerger;
+import org.apache.pinot.core.data.table.SortedRecordsTreeMerger;
 import org.apache.pinot.core.operator.AcquireReleaseColumnsSegmentOperator;
 import org.apache.pinot.core.operator.blocks.results.BaseResultsBlock;
 import org.apache.pinot.core.operator.blocks.results.GroupByResultsBlock;
@@ -47,10 +49,10 @@ import org.apache.pinot.core.util.GroupByUtils;
  * <p>Each worker thread produces sorted segment-level group-by results
  * while the main thread consumer via a {@code _blockingQueue} and merges them</p>
  *
- * <p>This allows merging in a streaming fashion without having to wait
- * for all segments to be ready. This sequential merging is usually
- * more efficient than the pair-size merging {@link SortedGroupByCombineOperator}
- * when the number of segments is smaller than the available number of cores</p>
+ * <p>Worker threads still stream blocks into {@code _blockingQueue}. After every segment
+ * block has arrived, combine uses a parallel tournament tree ({@link SortedRecordsTreeMerger})
+ * when there are two or more inputs so merge is no longer a single-thread fold
+ * (apache/pinot#12080). A single input is converted in place.</p>
  */
 @SuppressWarnings({"rawtypes"})
 public class SequentialSortedGroupByCombineOperator extends BaseSingleBlockCombineOperator<GroupByResultsBlock> {
@@ -125,6 +127,7 @@ public class SequentialSortedGroupByCombineOperator extends BaseSingleBlockCombi
       throws Exception {
     DataSchema dataSchema = null;
     int numBlocksMerged = 0;
+    List<GroupByResultsBlock> pending = new ArrayList<>(_numOperators);
     long endTimeMs = _queryContext.getEndTimeMs();
     while (numBlocksMerged < _numOperators) {
       // Timeout has reached, shouldn't continue to process. `_blockingQueue.poll` will continue to return blocks even
@@ -147,12 +150,7 @@ public class SequentialSortedGroupByCombineOperator extends BaseSingleBlockCombi
         dataSchema = groupByResultBlockToMerge.getDataSchema();
       }
 
-      // Merge records
-      if (_records == null) {
-        _records = GroupByUtils.getAndPopulateSortedRecords(groupByResultBlockToMerge);
-      } else {
-        _records = _sortedRecordsMerger.mergeGroupByResultsBlock(_records, groupByResultBlockToMerge);
-      }
+      pending.add(groupByResultBlockToMerge);
 
       // Set flags
       if (groupByResultBlockToMerge.isGroupsTrimmed()) {
@@ -167,6 +165,12 @@ public class SequentialSortedGroupByCombineOperator extends BaseSingleBlockCombi
 
       numBlocksMerged++;
     }
+
+    List<SortedRecords> recordsToMerge = new ArrayList<>(pending.size());
+    for (GroupByResultsBlock block : pending) {
+      recordsToMerge.add(GroupByUtils.getAndPopulateSortedRecords(block));
+    }
+    _records = SortedRecordsTreeMerger.mergeAll(recordsToMerge, _sortedRecordsMerger, _executorService);
 
     SortedRecordTable table = new SortedRecordTable(_records, dataSchema, _queryContext, _executorService);
     if (_queryContext.isServerReturnFinalResult()) {
