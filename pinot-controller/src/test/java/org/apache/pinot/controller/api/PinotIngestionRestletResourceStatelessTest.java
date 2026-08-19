@@ -22,8 +22,10 @@ import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileWriter;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.client.admin.PinotAdminClient;
 import org.apache.pinot.controller.ControllerConf;
@@ -99,9 +101,9 @@ public class PinotIngestionRestletResourceStatelessTest extends ControllerTest {
     _realtimeInputFile = new File(FileUtils.getTempDirectory(), "pinotIngestionRestletResourceTest_realtime.csv");
     try (BufferedWriter bw = new BufferedWriter(new FileWriter(_realtimeInputFile))) {
       bw.write("breed|name|ts\n");
-      bw.write("dog|cooper|1000\n");
-      bw.write("cat|kylo|2000\n");
-      bw.write("dog|cookie|3000\n");
+      bw.write("dog|cooper|1700000000000\n");
+      bw.write("cat|kylo|1700000001000\n");
+      bw.write("dog|cookie|1700000002000\n");
     }
   }
 
@@ -143,8 +145,9 @@ public class PinotIngestionRestletResourceStatelessTest extends ControllerTest {
   public void testIngestEndpointRealtimeTable()
       throws Exception {
     PinotAdminClient adminClient = getOrCreateAdminClient();
-    List<String> segments = _helixResourceManager.getSegmentsFor(REALTIME_TABLE_NAME_WITH_TYPE, false);
-    assertEquals(segments.size(), 0);
+    // LLC table setup already creates one CONSUMING segment per stream partition.
+    Set<String> before = new HashSet<>(_helixResourceManager.getSegmentsFor(REALTIME_TABLE_NAME_WITH_TYPE, false));
+    assertFalse(before.isEmpty());
 
     Map<String, String> batchConfigMap = new HashMap<>();
     batchConfigMap.put(BatchConfigProperties.INPUT_FORMAT, "csv");
@@ -153,15 +156,19 @@ public class PinotIngestionRestletResourceStatelessTest extends ControllerTest {
         adminClient.getFileIngestClient()
             .ingestFromFile(REALTIME_TABLE_NAME_WITH_TYPE, batchConfigMap, _realtimeInputFile),
         200);
-    segments = _helixResourceManager.getSegmentsFor(REALTIME_TABLE_NAME_WITH_TYPE, false);
-    assertEquals(segments.size(), 1);
+    Set<String> afterFile = new HashSet<>(_helixResourceManager.getSegmentsFor(REALTIME_TABLE_NAME_WITH_TYPE, false));
+    afterFile.removeAll(before);
+    assertEquals(afterFile.size(), 1);
 
+    Set<String> afterFirstIngest =
+        new HashSet<>(_helixResourceManager.getSegmentsFor(REALTIME_TABLE_NAME_WITH_TYPE, false));
     assertEquals(adminClient.getFileIngestClient()
             .ingestFromUri(REALTIME_TABLE_NAME_WITH_TYPE, batchConfigMap,
                 String.format("file://%s", _realtimeInputFile.getAbsolutePath()), _realtimeInputFile),
         200);
-    segments = _helixResourceManager.getSegmentsFor(REALTIME_TABLE_NAME_WITH_TYPE, false);
-    assertEquals(segments.size(), 2);
+    Set<String> afterUri = new HashSet<>(_helixResourceManager.getSegmentsFor(REALTIME_TABLE_NAME_WITH_TYPE, false));
+    afterUri.removeAll(afterFirstIngest);
+    assertEquals(afterUri.size(), 1);
   }
 
   @AfterClass

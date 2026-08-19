@@ -19,6 +19,7 @@
 package org.apache.pinot.controller.api.resources;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import io.swagger.annotations.Api;
 import io.swagger.annotations.ApiKeyAuthDefinition;
@@ -225,14 +226,7 @@ public class PinotIngestionRestletResource {
         .checkState(tableType != null, "Must provide table name with type suffix for table: %s", tableNameWithType);
     TableConfig tableConfig = _pinotHelixResourceManager.getTableConfig(tableNameWithType);
     Preconditions.checkState(tableConfig != null, "Table: %s not found", tableNameWithType);
-    // Upsert/dedup realtime tables require stream-partition routing for primary keys. File ingest
-    // builds a single uploaded segment and cannot honor that contract (#11914 / #11954).
-    Preconditions.checkState(!tableConfig.isUpsertEnabled(),
-        "Cannot ingest file into upsert table: %s. Use stream ingestion or a dedicated INSERT INTO path.",
-        tableNameWithType);
-    Preconditions.checkState(!tableConfig.isDedupEnabled(),
-        "Cannot ingest file into dedup table: %s. Use stream ingestion or a dedicated INSERT INTO path.",
-        tableNameWithType);
+    validateFileIngestTable(tableConfig, tableNameWithType);
     Map<String, String> batchConfigMap =
         JsonUtils.stringToObject(batchConfigMapStr, new TypeReference<Map<String, String>>() {
         });
@@ -246,6 +240,20 @@ public class PinotIngestionRestletResource {
             new File(_controllerConf.getLocalTempDir(), INGESTION_DIR), authProvider,
             _controllerConf.isIngestFromUriLocalFileSystemAllowed());
     return fileIngestionHelper.buildSegmentAndPush(payload);
+  }
+
+  /**
+   * Upsert/dedup realtime tables require stream-partition routing for primary keys. File ingest
+   * builds a single uploaded segment and cannot honor that contract (#11914 / #11954).
+   */
+  @VisibleForTesting
+  static void validateFileIngestTable(TableConfig tableConfig, String tableNameWithType) {
+    Preconditions.checkState(!tableConfig.isUpsertEnabled(),
+        "Cannot ingest file into upsert table: %s. Use stream ingestion or a dedicated INSERT INTO path.",
+        tableNameWithType);
+    Preconditions.checkState(!tableConfig.isDedupEnabled(),
+        "Cannot ingest file into dedup table: %s. Use stream ingestion or a dedicated INSERT INTO path.",
+        tableNameWithType);
   }
 
   private URI getControllerUri() {
