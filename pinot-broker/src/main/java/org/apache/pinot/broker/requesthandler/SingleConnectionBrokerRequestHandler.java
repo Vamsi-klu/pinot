@@ -34,6 +34,7 @@ import org.apache.pinot.common.config.TlsConfig;
 import org.apache.pinot.common.config.provider.TableCache;
 import org.apache.pinot.common.datatable.DataTable;
 import org.apache.pinot.common.failuredetector.FailureDetector;
+import org.apache.pinot.common.failuredetector.QueryTimeoutCircuitBreaker;
 import org.apache.pinot.common.metrics.BrokerMeter;
 import org.apache.pinot.common.metrics.BrokerQueryPhase;
 import org.apache.pinot.common.request.BrokerRequest;
@@ -74,6 +75,7 @@ public class SingleConnectionBrokerRequestHandler extends BaseSingleStageBrokerR
   protected final BrokerReduceService _brokerReduceService;
   protected final QueryRouter _queryRouter;
   protected final FailureDetector _failureDetector;
+  protected final QueryTimeoutCircuitBreaker _timeoutCircuitBreaker;
 
   /// Legacy constructor without an MV handler — see [BaseSingleStageBrokerRequestHandler]'s
   /// legacy ctor for the rationale.  Delegates with `materializedViewHandler = null`.
@@ -101,6 +103,7 @@ public class SingleConnectionBrokerRequestHandler extends BaseSingleStageBrokerR
     _queryRouter = new QueryRouter(_brokerId, nettyConfig, tlsConfig, serverRoutingStatsManager, threadAccountant);
     _failureDetector = failureDetector;
     _failureDetector.registerUnhealthyServerRetrier(this::retryUnhealthyServer);
+    _timeoutCircuitBreaker = new QueryTimeoutCircuitBreaker(failureDetector, config);
   }
 
   @Override
@@ -157,8 +160,14 @@ public class SingleConnectionBrokerRequestHandler extends BaseSingleStageBrokerR
       if (dataTable != null) {
         dataTableMap.put(entry.getKey(), dataTable);
         totalResponseSize += serverResponse.getResponseSize();
+        _timeoutCircuitBreaker.recordSuccess(entry.getKey().getInstanceId());
       } else {
         serversNotResponded.add(entry.getKey());
+      }
+    }
+    if (timedOut) {
+      for (ServerRoutingInstance server : serversNotResponded) {
+        _timeoutCircuitBreaker.recordTimeout(server.getInstanceId(), server.getHostname());
       }
     }
     ScatterResultStats stats = new ScatterResultStats(
@@ -277,6 +286,15 @@ public class SingleConnectionBrokerRequestHandler extends BaseSingleStageBrokerR
             totalResponseSizeHolder);
     long totalResponseSize = totalResponseSizeHolder[0];
     int numServersResponded = dataTableMap.size();
+    for (ServerRoutingInstance responded : dataTableMap.keySet()) {
+      _timeoutCircuitBreaker.recordSuccess(responded.getInstanceId());
+    }
+    if (baseAsyncResponse.getStatus() == QueryResponse.Status.TIMED_OUT
+        || materializedViewAsyncResponse.getStatus() == QueryResponse.Status.TIMED_OUT) {
+      for (ServerRoutingInstance server : serversNotResponded) {
+        _timeoutCircuitBreaker.recordTimeout(server.getInstanceId(), server.getHostname());
+      }
+    }
 
     /// On a SPLIT query, base and MV scatter-gathers cover DISJOINT halves of the timeline
     /// (base covers `ts < boundary`, MV covers `ts >= boundary`).  Partial failure on either
