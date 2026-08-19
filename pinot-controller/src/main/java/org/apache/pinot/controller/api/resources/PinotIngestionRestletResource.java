@@ -74,7 +74,9 @@ import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_K
 /**
  * APIs related to ingestion
  *
- * Ingest data into the tableNameWithType using the form multipart file
+ * Ingest data into the tableNameWithType using the form multipart file.
+ * Works for OFFLINE tables and non-upsert/non-dedup REALTIME tables
+ * (see apache/pinot#11914).
  * /ingestFromFile?tableNameWithType=foo_OFFLINE
  * &batchConfigMapStr={
  *   "inputFormat":"csv",
@@ -119,7 +121,8 @@ public class PinotIngestionRestletResource {
    * This call will copy the file locally, create a segment and push the segment to Pinot.
    * A response will be returned after the completion of all of the above steps.
    * All steps happen on the controller. This API is NOT meant for production environments/large input files.
-   * For Production setup, use the minion batch ingestion mechanism
+   * For Production setup, use the minion batch ingestion mechanism.
+   * Accepts OFFLINE tables and non-upsert/non-dedup REALTIME tables (apache/pinot#11914).
    *
    * @param tableNameWithType Name of the table to upload to, with type suffix
    * @param batchConfigMapStr Batch config Map as a string. Provide the
@@ -220,10 +223,16 @@ public class PinotIngestionRestletResource {
     TableType tableType = TableNameBuilder.getTableTypeFromTableName(tableNameWithType);
     Preconditions
         .checkState(tableType != null, "Must provide table name with type suffix for table: %s", tableNameWithType);
-    Preconditions
-        .checkState(TableType.REALTIME != tableType, "Cannot ingest file into REALTIME table: %s", tableNameWithType);
     TableConfig tableConfig = _pinotHelixResourceManager.getTableConfig(tableNameWithType);
     Preconditions.checkState(tableConfig != null, "Table: %s not found", tableNameWithType);
+    // Upsert/dedup realtime tables require stream-partition routing for primary keys. File ingest
+    // builds a single uploaded segment and cannot honor that contract (#11914 / #11954).
+    Preconditions.checkState(!tableConfig.isUpsertEnabled(),
+        "Cannot ingest file into upsert table: %s. Use stream ingestion or a dedicated INSERT INTO path.",
+        tableNameWithType);
+    Preconditions.checkState(!tableConfig.isDedupEnabled(),
+        "Cannot ingest file into dedup table: %s. Use stream ingestion or a dedicated INSERT INTO path.",
+        tableNameWithType);
     Map<String, String> batchConfigMap =
         JsonUtils.stringToObject(batchConfigMapStr, new TypeReference<Map<String, String>>() {
         });
