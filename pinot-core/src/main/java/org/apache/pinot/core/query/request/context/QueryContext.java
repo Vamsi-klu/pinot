@@ -819,7 +819,10 @@ public class QueryContext {
               _expressionOverrideHints, _explain);
       queryContext.setNullHandlingEnabled(QueryOptionsUtils.isNullHandlingEnabled(_queryOptions));
       queryContext.setEnablePartitionedAggregation(QueryOptionsUtils.isEnablePartitionedAggregation(_queryOptions));
-      queryContext.setServerReturnFinalResult(QueryOptionsUtils.isServerReturnFinalResult(_queryOptions));
+      // Partitioned combine already emits final cardinalities; the broker must sum them with
+      // mergeFinalResult. Set the flag here so broker and server share the same contract.
+      queryContext.setServerReturnFinalResult(QueryOptionsUtils.isServerReturnFinalResult(_queryOptions)
+          || queryContext.isEnablePartitionedAggregation());
       queryContext.setServerReturnFinalResultKeyUnpartitioned(
           QueryOptionsUtils.isServerReturnFinalResultKeyUnpartitioned(_queryOptions));
       queryContext.setGroupingSets(_groupingSets);

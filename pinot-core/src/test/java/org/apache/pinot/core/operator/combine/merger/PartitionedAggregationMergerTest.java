@@ -18,9 +18,11 @@
  */
 package org.apache.pinot.core.operator.combine.merger;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import org.apache.pinot.common.datatable.DataTable;
 import org.apache.pinot.core.operator.blocks.results.AggregationResultsBlock;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
 import org.apache.pinot.core.query.request.context.QueryContext;
@@ -28,7 +30,9 @@ import org.apache.pinot.core.query.request.context.utils.QueryContextConverterUt
 import org.testng.annotations.Test;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertThrows;
 import static org.testng.Assert.assertTrue;
+
 
 /**
  * Correctness tests for partition-aware DISTINCTCOUNT combine (apache/pinot#12057).
@@ -36,10 +40,11 @@ import static org.testng.Assert.assertTrue;
 public class PartitionedAggregationMergerTest {
 
   @Test
-  public void testDistinctCountUnionsWithinPartitionAndSumsAcrossPartitions() {
-    QueryContext queryContext = QueryContextConverterUtils.getQueryContext(
-        "SELECT DISTINCTCOUNT(userId) FROM test OPTION(enablePartitionedAggregation=true)");
+  public void testDistinctCountUnionsWithinPartitionAndSumsAcrossPartitions()
+      throws Exception {
+    QueryContext queryContext = partitionedQuery();
     assertTrue(queryContext.isEnablePartitionedAggregation());
+    assertTrue(queryContext.isServerReturnFinalResult());
     AggregationFunction[] functions = queryContext.getAggregationFunctions();
 
     // Partition 0, two time segments sharing userId u1 — must union, not sum.
@@ -47,27 +52,48 @@ public class PartitionedAggregationMergerTest {
     AggregationResultsBlock p0s2 = block(functions, queryContext, 0, setOf("u1", "u2"));
     // Partition 1 is disjoint.
     AggregationResultsBlock p1s1 = block(functions, queryContext, 1, setOf("u3", "u4"));
+    // Capture before merge — mergeWithinPartition mutates the first set in place.
+    int naiveSum = ((Set<?>) p0s1.getResults().get(0)).size() + ((Set<?>) p0s2.getResults().get(0)).size()
+        + ((Set<?>) p1s1.getResults().get(0)).size();
+    assertEquals(naiveSum, 6);
 
     List<Object> merged = PartitionedAggregationMerger.merge(functions, List.of(p0s1, p0s2, p1s1));
     assertEquals(merged.size(), 1);
     assertEquals(merged.get(0), 5);
 
-    // Naive per-segment cardinality sum (SEGMENTPARTITIONEDDISTINCTCOUNT) would be 2+2+2=6.
-    int naiveSum = ((Set<?>) p0s1.getResults().get(0)).size() + ((Set<?>) p0s2.getResults().get(0)).size()
-        + ((Set<?>) p1s1.getResults().get(0)).size();
-    assertEquals(naiveSum, 6);
+    AggregationResultsBlock finalBlock = new AggregationResultsBlock(functions, merged, queryContext);
+    finalBlock.setResultsAreFinal(true);
+    DataTable dataTable = finalBlock.getDataTable();
+    assertEquals(dataTable.getInt(0, 0), 5);
   }
 
   @Test
-  public void testMissingPartitionIdFallsBackToPerSegmentExtract() {
-    QueryContext queryContext = QueryContextConverterUtils.getQueryContext("SELECT DISTINCTCOUNT(userId) FROM test");
+  public void testMissingPartitionIdIsRejected() {
+    QueryContext queryContext = partitionedQuery();
     AggregationFunction[] functions = queryContext.getAggregationFunctions();
 
     AggregationResultsBlock a = block(functions, queryContext, null, setOf("a", "b"));
     AggregationResultsBlock b = block(functions, queryContext, null, setOf("b", "c"));
-    List<Object> merged = PartitionedAggregationMerger.merge(functions, List.of(a, b));
-    // Unknown partition ids are treated as distinct partitions, so counts are summed (2+2).
-    assertEquals(merged.get(0), 4);
+    assertThrows(IllegalStateException.class, () -> PartitionedAggregationMerger.merge(functions, List.of(a, b)));
+  }
+
+  @Test
+  public void testNullIntermediateInSamePartitionIsSkipped() {
+    QueryContext queryContext = partitionedQuery();
+    AggregationFunction[] functions = queryContext.getAggregationFunctions();
+
+    List<Object> nullResults = new ArrayList<>();
+    nullResults.add(null);
+    AggregationResultsBlock empty = new AggregationResultsBlock(functions, nullResults, queryContext);
+    empty.setPartitionId(0);
+    AggregationResultsBlock values = block(functions, queryContext, 0, setOf("a", "b"));
+    List<Object> merged = PartitionedAggregationMerger.merge(functions, List.of(empty, values));
+    assertEquals(merged.get(0), 2);
+  }
+
+  private static QueryContext partitionedQuery() {
+    return QueryContextConverterUtils.getQueryContext(
+        "SET enablePartitionedAggregation = true; SELECT DISTINCTCOUNT(userId) FROM test");
   }
 
   private static AggregationResultsBlock block(AggregationFunction[] functions, QueryContext queryContext,

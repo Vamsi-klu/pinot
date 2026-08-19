@@ -37,8 +37,8 @@ import org.apache.pinot.core.query.aggregation.function.PartitionedAggregationFu
  * with {@link PartitionedAggregationFunction#extractPartitionResult} and those results are merged
  * with {@link PartitionedAggregationFunction#mergePartitionResults}.
  *
- * <p>A missing partition id is treated as its own partition so the path degrades to regular
- * per-segment merge (then extract) instead of incorrectly summing across an unknown grouping.
+ * <p>A missing partition id is a hard error. Silent per-segment cardinality sum would overcount
+ * overlapping keys — the bug this path exists to avoid.
  *
  * <p>Stateless and thread-safe.
  */
@@ -55,7 +55,6 @@ public final class PartitionedAggregationMerger {
       List<AggregationResultsBlock> blocks) {
     int numFunctions = aggregationFunctions.length;
     Map<Integer, Object[]> perPartition = new HashMap<>();
-    int nextSyntheticPartition = -1;
     for (AggregationResultsBlock block : blocks) {
       if (block.getNumRows() == 0) {
         continue;
@@ -66,7 +65,8 @@ public final class PartitionedAggregationMerger {
       }
       Integer partitionId = block.getPartitionId();
       if (partitionId == null) {
-        partitionId = nextSyntheticPartition--;
+        throw new IllegalStateException(
+            "Partitioned aggregation combine requires a partition id on every results block");
       }
       Object[] partitionState = perPartition.computeIfAbsent(partitionId, id -> new Object[numFunctions]);
       for (int i = 0; i < numFunctions; i++) {
@@ -91,12 +91,12 @@ public final class PartitionedAggregationMerger {
         Object partitionResult;
         if (function instanceof PartitionedAggregationFunction) {
           partitionResult = ((PartitionedAggregationFunction) function).extractPartitionResult(partitionState[i]);
-          partitionMerged =
-              ((PartitionedAggregationFunction) function).mergePartitionResults(partitionMerged, partitionResult);
+          partitionMerged = ((PartitionedAggregationFunction) function).mergePartitionResults(
+              (Comparable) partitionMerged, (Comparable) partitionResult);
         } else {
           partitionResult = function.extractFinalResult(partitionState[i]);
           partitionMerged = partitionMerged == null ? partitionResult
-              : function.mergeFinalResult(partitionMerged, partitionResult);
+              : function.mergeFinalResult((Comparable) partitionMerged, (Comparable) partitionResult);
         }
       }
       if (partitionMerged == null && function instanceof PartitionedAggregationFunction) {

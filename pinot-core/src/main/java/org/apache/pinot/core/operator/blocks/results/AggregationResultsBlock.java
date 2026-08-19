@@ -52,6 +52,7 @@ public class AggregationResultsBlock extends BaseResultsBlock {
   private final QueryContext _queryContext;
   @Nullable
   private Integer _partitionId;
+  private boolean _resultsAreFinal;
 
   public AggregationResultsBlock(AggregationFunction[] aggregationFunctions, List<Object> results,
       QueryContext queryContext) {
@@ -79,6 +80,14 @@ public class AggregationResultsBlock extends BaseResultsBlock {
 
   public void setPartitionId(@Nullable Integer partitionId) {
     _partitionId = partitionId;
+  }
+
+  /**
+   * When true, {@code _results} already holds final values (e.g. Integer cardinalities from
+   * partitioned combine) and must not be passed to {@code extractFinalResult}.
+   */
+  public void setResultsAreFinal(boolean resultsAreFinal) {
+    _resultsAreFinal = resultsAreFinal;
   }
 
   @Override
@@ -123,7 +132,7 @@ public class AggregationResultsBlock extends BaseResultsBlock {
     int numColumns = _results.size();
     Object[] row = new Object[numColumns];
     for (int i = 0; i < numColumns; i++) {
-      row[i] = _aggregationFunctions[i].extractFinalResult(_results.get(i));
+      row[i] = toFinalResult(i);
     }
     return List.<Object[]>of(row);
   }
@@ -151,7 +160,7 @@ public class AggregationResultsBlock extends BaseResultsBlock {
       dataTableBuilder.startRow();
       if (returnFinalResult) {
         for (int i = 0; i < numColumns; i++) {
-          Object result = _aggregationFunctions[i].extractFinalResult(_results.get(i));
+          Object result = toFinalResult(i);
           if (result == null) {
             result = columnDataTypes[i].getNullPlaceholder();
             nullBitmaps[i].add(0);
@@ -186,7 +195,7 @@ public class AggregationResultsBlock extends BaseResultsBlock {
       dataTableBuilder.startRow();
       if (returnFinalResult) {
         for (int i = 0; i < numColumns; i++) {
-          Object result = _aggregationFunctions[i].extractFinalResult(_results.get(i));
+          Object result = toFinalResult(i);
           if (result == null) {
             dataTableBuilder.setNull(i);
           } else {
@@ -210,6 +219,13 @@ public class AggregationResultsBlock extends BaseResultsBlock {
       dataTableBuilder.finishRow();
     }
     return dataTableBuilder.build();
+  }
+
+  private Object toFinalResult(int index) {
+    if (_resultsAreFinal) {
+      return _results.get(index);
+    }
+    return _aggregationFunctions[index].extractFinalResult(_results.get(index));
   }
 
   private void setFinalResult(DataTableBuilder dataTableBuilder, ColumnDataType[] columnDataTypes, int index,

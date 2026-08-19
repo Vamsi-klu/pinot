@@ -822,7 +822,9 @@ public class CommonConstants {
         public static final String ENABLE_NULL_HANDLING = "enableNullHandling";
         /**
          * When true, aggregation-only DISTINCTCOUNT (and other PartitionedAggregationFunction
-         * implementations) merge within a partition then sum across partitions. Default false.
+         * implementations) union within a partition then sum across partitions. Requires a
+         * resolvable partition id on every segment; missing ids fail the query. Also enables
+         * serverReturnFinalResult so the broker sums Integer finals. Default false.
          */
         public static final String ENABLE_PARTITIONED_AGGREGATION = "enablePartitionedAggregation";
         public static final String APPLICATION_NAME = "applicationName";

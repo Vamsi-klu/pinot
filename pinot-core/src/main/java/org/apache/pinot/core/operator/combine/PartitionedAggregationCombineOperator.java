@@ -20,8 +20,11 @@ package org.apache.pinot.core.operator.combine;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
+import javax.annotation.Nullable;
+import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.common.utils.SegmentUtils;
 import org.apache.pinot.core.common.Operator;
 import org.apache.pinot.core.operator.AcquireReleaseColumnsSegmentOperator;
@@ -30,16 +33,19 @@ import org.apache.pinot.core.operator.blocks.results.BaseResultsBlock;
 import org.apache.pinot.core.operator.combine.merger.PartitionedAggregationMerger;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
 import org.apache.pinot.core.query.request.context.QueryContext;
+import org.apache.pinot.segment.spi.ColumnMetadata;
 import org.apache.pinot.segment.spi.IndexSegment;
+import org.apache.pinot.segment.spi.SegmentMetadata;
 
 
 /**
  * Combine operator for aggregation-only queries that use the partitioned-aggregation path
  * (apache/pinot#12057).
  *
- * <p>Each worker attaches the producing segment's partition id (from the segment name) to the
- * results block. The main thread then runs {@link PartitionedAggregationMerger} and returns
- * final-result values so the broker can sum across servers with {@code mergeFinalResult}.
+ * <p>Each worker attaches the producing segment's partition id (from the segment name or column
+ * partition metadata) to the results block. The main thread then runs
+ * {@link PartitionedAggregationMerger}. Results are already final cardinalities; the query option
+ * sets {@code serverReturnFinalResult} in {@link QueryContext} so broker and server agree.
  */
 @SuppressWarnings({"rawtypes"})
 public class PartitionedAggregationCombineOperator extends BaseSingleBlockCombineOperator<AggregationResultsBlock> {
@@ -66,10 +72,13 @@ public class PartitionedAggregationCombineOperator extends BaseSingleBlockCombin
           ((AcquireReleaseColumnsSegmentOperator) operator).acquire();
         }
         resultsBlock = (AggregationResultsBlock) operator.nextBlock();
-        IndexSegment segment = operator.getIndexSegment();
-        if (segment != null) {
-          resultsBlock.setPartitionId(SegmentUtils.getPartitionIdFromSegmentName(segment.getSegmentName()));
+        Integer partitionId = resolvePartitionId(operator, _queryContext);
+        if (partitionId == null) {
+          throw new IllegalStateException(
+              "enablePartitionedAggregation requires a resolvable partition id on every segment. "
+                  + "Use partitioned replica-group assignment or LLC / uploaded-realtime segment names.");
         }
+        resultsBlock.setPartitionId(partitionId);
       } catch (RuntimeException e) {
         throw wrapOperatorException(operator, e);
       } finally {
@@ -105,9 +114,72 @@ public class PartitionedAggregationCombineOperator extends BaseSingleBlockCombin
     AggregationFunction[] aggregationFunctions = _queryContext.getAggregationFunctions();
     assert aggregationFunctions != null;
     List<Object> mergedResults = PartitionedAggregationMerger.merge(aggregationFunctions, blocks);
-    // Partition results are already final (e.g. Integer cardinality). Tell serialization to use
-    // final column types so the broker can sum them with mergeFinalResult.
-    _queryContext.setServerReturnFinalResult(true);
-    return new AggregationResultsBlock(aggregationFunctions, mergedResults, _queryContext);
+    AggregationResultsBlock merged = new AggregationResultsBlock(aggregationFunctions, mergedResults, _queryContext);
+    merged.setResultsAreFinal(true);
+    return merged;
+  }
+
+  @Nullable
+  static Integer resolvePartitionId(Operator operator, QueryContext queryContext) {
+    IndexSegment segment = findSegment(operator);
+    if (segment == null) {
+      return null;
+    }
+    Integer fromName = SegmentUtils.getPartitionIdFromSegmentName(segment.getSegmentName());
+    if (fromName != null) {
+      return fromName;
+    }
+    return partitionIdFromColumnMetadata(segment, queryContext);
+  }
+
+  @Nullable
+  private static Integer partitionIdFromColumnMetadata(IndexSegment segment, QueryContext queryContext) {
+    SegmentMetadata metadata = segment.getSegmentMetadata();
+    AggregationFunction[] functions = queryContext.getAggregationFunctions();
+    if (metadata == null || functions == null) {
+      return null;
+    }
+    Integer found = null;
+    for (AggregationFunction function : functions) {
+      for (Object input : function.getInputExpressions()) {
+        if (!(input instanceof ExpressionContext expression)
+            || expression.getType() != ExpressionContext.Type.IDENTIFIER) {
+          continue;
+        }
+        ColumnMetadata columnMetadata = metadata.getColumnMetadataFor(expression.getIdentifier());
+        if (columnMetadata == null) {
+          continue;
+        }
+        Set<Integer> partitions = columnMetadata.getPartitions();
+        if (partitions == null || partitions.size() != 1) {
+          continue;
+        }
+        int partitionId = partitions.iterator().next();
+        if (found != null && found != partitionId) {
+          return null;
+        }
+        found = partitionId;
+      }
+    }
+    return found;
+  }
+
+  @Nullable
+  private static IndexSegment findSegment(Operator operator) {
+    IndexSegment segment = operator.getIndexSegment();
+    if (segment != null) {
+      return segment;
+    }
+    List<? extends Operator> children = operator.getChildOperators();
+    if (children == null) {
+      return null;
+    }
+    for (Operator child : children) {
+      segment = findSegment(child);
+      if (segment != null) {
+        return segment;
+      }
+    }
+    return null;
   }
 }

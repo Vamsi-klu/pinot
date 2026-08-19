@@ -96,6 +96,12 @@ public class DistinctCountAggregationFunction extends BaseDistinctAggregateAggre
   @Nullable
   @Override
   public Set mergeWithinPartition(@Nullable Set intermediateResult1, @Nullable Set intermediateResult2) {
+    if (intermediateResult1 == null) {
+      return intermediateResult2;
+    }
+    if (intermediateResult2 == null) {
+      return intermediateResult1;
+    }
     return merge(intermediateResult1, intermediateResult2);
   }
 
