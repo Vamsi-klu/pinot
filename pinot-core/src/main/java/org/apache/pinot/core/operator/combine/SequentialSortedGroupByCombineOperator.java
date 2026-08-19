@@ -170,7 +170,7 @@ public class SequentialSortedGroupByCombineOperator extends BaseSingleBlockCombi
     for (GroupByResultsBlock block : pending) {
       recordsToMerge.add(GroupByUtils.getAndPopulateSortedRecords(block));
     }
-    _records = SortedRecordsTreeMerger.mergeAll(recordsToMerge, _sortedRecordsMerger, _executorService);
+    _records = SortedRecordsTreeMerger.mergeAll(recordsToMerge, _sortedRecordsMerger, _executorService, endTimeMs);
 
     SortedRecordTable table = new SortedRecordTable(_records, dataSchema, _queryContext, _executorService);
     if (_queryContext.isServerReturnFinalResult()) {

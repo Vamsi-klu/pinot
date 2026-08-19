@@ -23,6 +23,8 @@ import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import javax.annotation.concurrent.ThreadSafe;
 import org.apache.pinot.spi.query.QueryThreadContext;
 
@@ -31,11 +33,13 @@ import org.apache.pinot.spi.query.QueryThreadContext;
  * Parallel tournament-tree merger for sorted GROUP BY records.
  *
  * <p>Each level pair-wise merges {@link SortedRecords} using {@link SortedRecordsMerger}. Independent
- * pairs run on {@code executorService} so combine is no longer a single-thread fold
- * (apache/pinot#12080).
+ * pairs run concurrently on {@code executorService}. {@code merger} is invoked concurrently and
+ * must be thread-safe. A single input is returned as-is without copying. An empty list becomes an
+ * empty {@link SortedRecords}.
  *
- * <p>The merger mutates its left input, so each pair copies the left array before merging. Inputs
- * at a given level are used once, so pairs do not share {@link SortedRecords} instances.
+ * <p>{@link SortedRecordsMerger#mergeSortedRecordArray} allocates a new array and writes it back
+ * onto the left wrapper, so left inputs at a given level can be passed through without a defensive
+ * copy. Each input is used once per level.
  *
  * <p>This class is stateless and thread-safe.
  */
@@ -45,12 +49,12 @@ public final class SortedRecordsTreeMerger {
   }
 
   /**
-   * Merges {@code inputs} into one {@link SortedRecords}. Returns an empty result when the list is
-   * empty. A single input is returned as-is.
+   * Merges {@code inputs} into one {@link SortedRecords}. Pair tasks are cancelled if the query
+   * deadline {@code endTimeMs} is reached or a sibling pair fails.
    */
   public static SortedRecords mergeAll(List<SortedRecords> inputs, SortedRecordsMerger merger,
-      ExecutorService executorService)
-      throws InterruptedException, ExecutionException {
+      ExecutorService executorService, long endTimeMs)
+      throws InterruptedException, ExecutionException, TimeoutException {
     if (inputs.isEmpty()) {
       return new SortedRecords(new Record[0], 0);
     }
@@ -62,25 +66,29 @@ public final class SortedRecordsTreeMerger {
       QueryThreadContext.checkTerminationAndSampleUsage("SortedRecordsTreeMerger");
       List<SortedRecords> next = new ArrayList<>((current.size() + 1) / 2);
       List<Future<SortedRecords>> futures = new ArrayList<>(current.size() / 2);
-      for (int i = 0; i + 1 < current.size(); i += 2) {
-        SortedRecords left = current.get(i);
-        SortedRecords right = current.get(i + 1);
-        futures.add(executorService.submit(() -> merger.mergeSortedRecordArray(copyArray(left), right)));
-      }
-      if ((current.size() & 1) == 1) {
-        next.add(current.get(current.size() - 1));
-      }
-      for (Future<SortedRecords> future : futures) {
-        next.add(future.get());
+      try {
+        for (int i = 0; i + 1 < current.size(); i += 2) {
+          SortedRecords left = current.get(i);
+          SortedRecords right = current.get(i + 1);
+          futures.add(executorService.submit(() -> merger.mergeSortedRecordArray(left, right)));
+        }
+        if ((current.size() & 1) == 1) {
+          next.add(current.get(current.size() - 1));
+        }
+        for (Future<SortedRecords> future : futures) {
+          long waitTimeMs = endTimeMs - System.currentTimeMillis();
+          if (waitTimeMs <= 0) {
+            throw new TimeoutException("Timed out merging sorted GROUP BY records");
+          }
+          next.add(future.get(waitTimeMs, TimeUnit.MILLISECONDS));
+        }
+      } finally {
+        for (Future<SortedRecords> future : futures) {
+          future.cancel(true);
+        }
       }
       current = next;
     }
     return current.get(0);
-  }
-
-  private static SortedRecords copyArray(SortedRecords source) {
-    Record[] records = new Record[source._size];
-    System.arraycopy(source._records, 0, records, 0, source._size);
-    return new SortedRecords(records, source._size);
   }
 }
