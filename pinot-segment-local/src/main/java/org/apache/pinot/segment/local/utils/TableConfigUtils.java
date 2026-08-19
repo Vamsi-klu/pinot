@@ -402,7 +402,8 @@ public final class TableConfigUtils {
       if (dimensionTableConfig != null) {
         Preconditions.checkState(
             !(dimensionTableConfig.isEnableUpsert() && dimensionTableConfig.isErrorOnDuplicatePrimaryKey()),
-            "dimensionTableConfig.enableUpsert and errorOnDuplicatePrimaryKey cannot both be true");
+            "dimensionTableConfig.enableUpsert and errorOnDuplicatePrimaryKey cannot both be true for table: %s",
+            tableConfig.getTableName());
       }
     }
 

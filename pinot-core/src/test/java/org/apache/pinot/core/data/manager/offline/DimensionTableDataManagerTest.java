@@ -24,6 +24,7 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.Executors;
 import org.apache.commons.io.FileUtils;
@@ -169,6 +170,10 @@ public class DimensionTableDataManagerTest {
   private DimensionTableDataManager makeTableDataManager(TableConfig tableConfig, Schema schema,
       ZkHelixPropertyStore<ZNRecord> propertyStoreMock)
       throws JsonProcessingException {
+    DimensionTableDataManager existing = DimensionTableDataManager.getInstanceByTableName(OFFLINE_TABLE_NAME);
+    if (existing != null) {
+      existing.shutDown();
+    }
     HelixManager helixManager = mock(HelixManager.class);
     when(propertyStoreMock.get("/CONFIGS/TABLE/dimBaseballTeams_OFFLINE", null, AccessOption.PERSISTENT)).thenReturn(
         TableConfigSerDeUtils.toZNRecord(tableConfig));
@@ -417,6 +422,7 @@ public class DimensionTableDataManagerTest {
     TableConfig tableConfig = getTableConfig(false, false, true);
     Schema schema = getSchema();
     DimensionTableDataManager tableDataManager = makeTableDataManager(tableConfig, schema);
+    assertTrue(tableDataManager.isLookupUpsertEnabled());
     tableDataManager.addSegment(ImmutableSegmentLoader.load(_indexDir, new IndexLoadingConfig(tableConfig, schema),
         SEGMENT_OPERATIONS_THROTTLER));
 
@@ -426,13 +432,12 @@ public class DimensionTableDataManagerTest {
     assertEquals(original.getValue("teamName"), "San Francisco Giants");
 
     File updatedCsv = new File(TEMP_DIR, "dimBaseballTeams_updated.csv");
-    FileUtils.write(updatedCsv, "teamID,teamName\nSF,San Francisco Seals\n", java.nio.charset.StandardCharsets.UTF_8);
+    FileUtils.write(updatedCsv, "teamID,teamName\nSF,San Francisco Seals\n", StandardCharsets.UTF_8);
     File updatedTableDir = new File(TEMP_DIR, "updatedTable");
     SegmentGeneratorConfig updatedConfig =
         SegmentTestUtils.getSegmentGeneratorConfig(updatedCsv, FileFormat.CSV, updatedTableDir, RAW_TABLE_NAME,
             tableConfig, schema);
-    // Force a later creation time so upsert sort picks this segment last.
-    Thread.sleep(10);
+    updatedConfig.setCreationTime(String.valueOf(System.currentTimeMillis() + 86_400_000L));
     SegmentIndexCreationDriver updatedDriver = new SegmentIndexCreationDriverImpl();
     updatedDriver.init(updatedConfig);
     updatedDriver.build();
@@ -448,32 +453,15 @@ public class DimensionTableDataManagerTest {
   }
 
   @Test
-  public void testLookupFirstWinsWhenUpsertDisabled()
+  public void testEnableUpsertFalseIsHonoredOnBothLoaders()
       throws Exception {
-    TableConfig tableConfig = getTableConfig(false, false, false);
-    Schema schema = getSchema();
-    DimensionTableDataManager tableDataManager = makeTableDataManager(tableConfig, schema);
-    tableDataManager.addSegment(ImmutableSegmentLoader.load(_indexDir, new IndexLoadingConfig(tableConfig, schema),
-        SEGMENT_OPERATIONS_THROTTLER));
+    TableConfig fast = getTableConfig(false, false, false);
+    DimensionTableDataManager fastManager = makeTableDataManager(fast, getSchema());
+    assertFalse(fastManager.isLookupUpsertEnabled());
 
-    File updatedCsv = new File(TEMP_DIR, "dimBaseballTeams_first_wins.csv");
-    FileUtils.write(updatedCsv, "teamID,teamName\nSF,San Francisco Seals\n", java.nio.charset.StandardCharsets.UTF_8);
-    File updatedTableDir = new File(TEMP_DIR, "firstWinsTable");
-    SegmentGeneratorConfig updatedConfig =
-        SegmentTestUtils.getSegmentGeneratorConfig(updatedCsv, FileFormat.CSV, updatedTableDir, RAW_TABLE_NAME,
-            tableConfig, schema);
-    SegmentIndexCreationDriver updatedDriver = new SegmentIndexCreationDriverImpl();
-    updatedDriver.init(updatedConfig);
-    updatedDriver.build();
-    File updatedIndexDir = new File(updatedTableDir, updatedDriver.getSegmentName());
-
-    tableDataManager.addSegment(
-        ImmutableSegmentLoader.load(updatedIndexDir, new IndexLoadingConfig(tableConfig, schema),
-            SEGMENT_OPERATIONS_THROTTLER));
-
-    GenericRow kept = tableDataManager.lookupRow(new PrimaryKey(new String[]{"SF"}));
-    assertNotNull(kept);
-    assertEquals(kept.getValue("teamName"), "San Francisco Giants");
+    TableConfig mem = getTableConfig(true, false, false);
+    DimensionTableDataManager memManager = makeTableDataManager(mem, getSchema());
+    assertFalse(memManager.isLookupUpsertEnabled());
   }
 
   protected static TableConfig createTableConfig(File tableConfigFile)

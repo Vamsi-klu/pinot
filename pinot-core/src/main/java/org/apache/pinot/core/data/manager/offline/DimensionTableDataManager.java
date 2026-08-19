@@ -215,8 +215,9 @@ public class DimensionTableDataManager extends OfflineTableDataManager {
         "Primary key columns must be configured for dimension table: %s", _tableNameWithType);
 
     List<SegmentDataManager> segmentDataManagers = acquireAllSegments();
-    if (_enableUpsert) {
-      sortSegmentsForUpsert(segmentDataManagers);
+    // Sort so first-wins / last-wins is deterministic across servers (CHM iteration is not).
+    if (!_errorOnDuplicatePrimaryKey) {
+      sortSegmentsForLookup(segmentDataManagers);
     }
     try {
       // count all documents to limit map re-sizings
@@ -298,8 +299,8 @@ public class DimensionTableDataManager extends OfflineTableDataManager {
         "Primary key columns must be configured for dimension table: %s", _tableNameWithType);
 
     List<SegmentDataManager> segmentDataManagers = acquireAllSegments();
-    if (_enableUpsert) {
-      sortSegmentsForUpsert(segmentDataManagers);
+    if (!_errorOnDuplicatePrimaryKey) {
+      sortSegmentsForLookup(segmentDataManagers);
     }
     List<PinotSegmentRecordReader> recordReaders = new ArrayList<>(segmentDataManagers.size());
 
@@ -355,7 +356,7 @@ public class DimensionTableDataManager extends OfflineTableDataManager {
         this);
   }
 
-  private void sortSegmentsForUpsert(List<SegmentDataManager> segmentDataManagers) {
+  private void sortSegmentsForLookup(List<SegmentDataManager> segmentDataManagers) {
     segmentDataManagers.sort(Comparator
         .comparingLong((SegmentDataManager segmentDataManager) -> segmentDataManager.getSegment().getSegmentMetadata()
             .getIndexCreationTime())
@@ -375,6 +376,11 @@ public class DimensionTableDataManager extends OfflineTableDataManager {
     for (SegmentDataManager dataManager : segmentDataManagers) {
       releaseSegment(dataManager);
     }
+  }
+
+  @VisibleForTesting
+  boolean isLookupUpsertEnabled() {
+    return _enableUpsert;
   }
 
   public boolean isPopulated() {
