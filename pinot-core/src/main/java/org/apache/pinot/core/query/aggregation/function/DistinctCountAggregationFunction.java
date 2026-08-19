@@ -33,7 +33,8 @@ import org.apache.pinot.segment.spi.AggregationFunctionType;
 /**
  * Aggregation function to compute the count of distinct values for an SV column.
  */
-public class DistinctCountAggregationFunction extends BaseDistinctAggregateAggregationFunction<Integer> {
+public class DistinctCountAggregationFunction extends BaseDistinctAggregateAggregationFunction<Integer>
+    implements PartitionedAggregationFunction<Set, Integer> {
 
   public DistinctCountAggregationFunction(List<ExpressionContext> arguments, boolean nullHandlingEnabled) {
     super(verifySingleArgument(arguments, "DISTINCT_COUNT"), AggregationFunctionType.DISTINCTCOUNT,
@@ -90,5 +91,29 @@ public class DistinctCountAggregationFunction extends BaseDistinctAggregateAggre
   @Override
   public Integer mergeFinalResult(Integer finalResult1, Integer finalResult2) {
     return finalResult1 + finalResult2;
+  }
+
+  @Nullable
+  @Override
+  public Set mergeWithinPartition(@Nullable Set intermediateResult1, @Nullable Set intermediateResult2) {
+    return merge(intermediateResult1, intermediateResult2);
+  }
+
+  @Nullable
+  @Override
+  public Integer extractPartitionResult(@Nullable Set intermediateResult) {
+    return extractFinalResult(intermediateResult);
+  }
+
+  @Nullable
+  @Override
+  public Integer mergePartitionResults(@Nullable Integer partitionResult1, @Nullable Integer partitionResult2) {
+    if (partitionResult1 == null) {
+      return partitionResult2 == null ? 0 : partitionResult2;
+    }
+    if (partitionResult2 == null) {
+      return partitionResult1;
+    }
+    return mergeFinalResult(partitionResult1, partitionResult2);
   }
 }

@@ -30,12 +30,15 @@ import org.apache.pinot.core.operator.combine.BaseCombineOperator;
 import org.apache.pinot.core.operator.combine.DistinctCombineOperator;
 import org.apache.pinot.core.operator.combine.GroupByCombineOperator;
 import org.apache.pinot.core.operator.combine.MinMaxValueBasedSelectionOrderByCombineOperator;
+import org.apache.pinot.core.operator.combine.PartitionedAggregationCombineOperator;
 import org.apache.pinot.core.operator.combine.SelectionOnlyCombineOperator;
 import org.apache.pinot.core.operator.combine.SelectionOrderByCombineOperator;
 import org.apache.pinot.core.operator.combine.SequentialSortedGroupByCombineOperator;
 import org.apache.pinot.core.operator.combine.SortedGroupByCombineOperator;
 import org.apache.pinot.core.operator.streaming.StreamingGroupByCombineOperator;
 import org.apache.pinot.core.operator.streaming.StreamingSelectionOnlyCombineOperator;
+import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
+import org.apache.pinot.core.query.aggregation.function.PartitionedAggregationFunction;
 import org.apache.pinot.core.query.executor.ResultsBlockStreamer;
 import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.core.query.request.context.utils.QueryContextUtils;
@@ -144,6 +147,9 @@ public class CombinePlanNode implements PlanNode {
     if (QueryContextUtils.isAggregationQuery(_queryContext)) {
       if (_queryContext.getGroupByExpressions() == null) {
         // Aggregation only
+        if (_queryContext.isEnablePartitionedAggregation() && allPartitioned(_queryContext.getAggregationFunctions())) {
+          return new PartitionedAggregationCombineOperator(operators, _queryContext, _executorService);
+        }
         return new AggregationCombineOperator(operators, _queryContext, _executorService);
       } else {
         // Sorted aggregation group-by, when safeTrim and limit is not too large
@@ -174,5 +180,17 @@ public class CombinePlanNode implements PlanNode {
       assert QueryContextUtils.isDistinctQuery(_queryContext);
       return new DistinctCombineOperator(operators, _queryContext, _executorService);
     }
+  }
+
+  private static boolean allPartitioned(AggregationFunction[] aggregationFunctions) {
+    if (aggregationFunctions == null || aggregationFunctions.length == 0) {
+      return false;
+    }
+    for (AggregationFunction aggregationFunction : aggregationFunctions) {
+      if (!(aggregationFunction instanceof PartitionedAggregationFunction)) {
+        return false;
+      }
+    }
+    return true;
   }
 }

@@ -26,6 +26,7 @@ import it.unimi.dsi.fastutil.objects.ObjectArrayList;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.List;
+import javax.annotation.Nullable;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pinot.common.datatable.DataTable;
 import org.apache.pinot.common.request.context.FilterContext;
@@ -49,6 +50,8 @@ public class AggregationResultsBlock extends BaseResultsBlock {
   private final AggregationFunction[] _aggregationFunctions;
   private final List<Object> _results;
   private final QueryContext _queryContext;
+  @Nullable
+  private Integer _partitionId;
 
   public AggregationResultsBlock(AggregationFunction[] aggregationFunctions, List<Object> results,
       QueryContext queryContext) {
@@ -63,6 +66,19 @@ public class AggregationResultsBlock extends BaseResultsBlock {
 
   public List<Object> getResults() {
     return _results;
+  }
+
+  /**
+   * Partition id of the segment that produced this block, if known. Used by the partitioned
+   * aggregation combine path (apache/pinot#12057).
+   */
+  @Nullable
+  public Integer getPartitionId() {
+    return _partitionId;
+  }
+
+  public void setPartitionId(@Nullable Integer partitionId) {
+    _partitionId = partitionId;
   }
 
   @Override

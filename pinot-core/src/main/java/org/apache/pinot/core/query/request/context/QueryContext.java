@@ -145,6 +145,8 @@ public class QueryContext {
   private int _streamingGroupByFlushThreshold;
   // Whether null handling is enabled
   private boolean _nullHandlingEnabled;
+  // Whether partitioned aggregation combine is enabled (apache/pinot#12057)
+  private boolean _enablePartitionedAggregation;
   // Whether server returns the final result
   private boolean _serverReturnFinalResult;
   // Whether server returns the final result with unpartitioned group key
@@ -555,6 +557,14 @@ public class QueryContext {
     _nullHandlingEnabled = nullHandlingEnabled;
   }
 
+  public boolean isEnablePartitionedAggregation() {
+    return _enablePartitionedAggregation;
+  }
+
+  public void setEnablePartitionedAggregation(boolean enablePartitionedAggregation) {
+    _enablePartitionedAggregation = enablePartitionedAggregation;
+  }
+
   public boolean isServerReturnFinalResult() {
     return _serverReturnFinalResult;
   }
@@ -808,6 +818,7 @@ public class QueryContext {
               _filter, _groupByExpressions, _havingFilter, _orderByExpressions, _limit, _offset, _queryOptions,
               _expressionOverrideHints, _explain);
       queryContext.setNullHandlingEnabled(QueryOptionsUtils.isNullHandlingEnabled(_queryOptions));
+      queryContext.setEnablePartitionedAggregation(QueryOptionsUtils.isEnablePartitionedAggregation(_queryOptions));
       queryContext.setServerReturnFinalResult(QueryOptionsUtils.isServerReturnFinalResult(_queryOptions));
       queryContext.setServerReturnFinalResultKeyUnpartitioned(
           QueryOptionsUtils.isServerReturnFinalResultKeyUnpartitioned(_queryOptions));
