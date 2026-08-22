@@ -62,6 +62,7 @@ import org.apache.pinot.segment.spi.index.startree.AggregationFunctionColumnPair
 import org.apache.pinot.spi.annotations.FunctionVolatility;
 import org.apache.pinot.spi.config.table.ColumnPartitionConfig;
 import org.apache.pinot.spi.config.table.DedupConfig;
+import org.apache.pinot.spi.config.table.DimensionTableConfig;
 import org.apache.pinot.spi.config.table.FieldConfig;
 import org.apache.pinot.spi.config.table.FieldConfig.EncodingType;
 import org.apache.pinot.spi.config.table.HashFunction;
@@ -400,6 +401,13 @@ public final class TableConfigUtils {
           "Dimension table must be of OFFLINE table type.");
       Preconditions.checkState(CollectionUtils.isNotEmpty(schema.getPrimaryKeyColumns()),
           "Dimension table must have primary key[s]");
+      DimensionTableConfig dimensionTableConfig = tableConfig.getDimensionTableConfig();
+      if (dimensionTableConfig != null) {
+        Preconditions.checkState(
+            !(dimensionTableConfig.isEnableUpsert() && dimensionTableConfig.isErrorOnDuplicatePrimaryKey()),
+            "dimensionTableConfig.enableUpsert and errorOnDuplicatePrimaryKey cannot both be true for table: %s",
+            tableConfig.getTableName());
+      }
     }
 
     String peerSegmentDownloadScheme = validationConfig.getPeerSegmentDownloadScheme();

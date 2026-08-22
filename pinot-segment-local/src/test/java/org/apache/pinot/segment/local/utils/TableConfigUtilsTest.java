@@ -34,6 +34,7 @@ import org.apache.pinot.segment.spi.index.startree.AggregationFunctionColumnPair
 import org.apache.pinot.spi.config.table.BloomFilterConfig;
 import org.apache.pinot.spi.config.table.ColumnPartitionConfig;
 import org.apache.pinot.spi.config.table.DedupConfig;
+import org.apache.pinot.spi.config.table.DimensionTableConfig;
 import org.apache.pinot.spi.config.table.FieldConfig;
 import org.apache.pinot.spi.config.table.FieldConfig.CompressionCodec;
 import org.apache.pinot.spi.config.table.HashFunction;
@@ -277,6 +278,18 @@ public class TableConfigUtilsTest {
         .build();
     tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(TABLE_NAME).setIsDimTable(true).build();
     TableConfigUtils.validate(tableConfig, schema);
+
+    // enableUpsert and errorOnDuplicatePrimaryKey are mutually exclusive
+    tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(TABLE_NAME)
+        .setIsDimTable(true)
+        .setDimensionTableConfig(new DimensionTableConfig(false, true, true))
+        .build();
+    try {
+      TableConfigUtils.validate(tableConfig, schema);
+      fail("Should fail when enableUpsert and errorOnDuplicatePrimaryKey are both true");
+    } catch (IllegalStateException e) {
+      // expected
+    }
   }
 
   @Test
