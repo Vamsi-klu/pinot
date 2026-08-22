@@ -1151,6 +1151,16 @@ public class CommonConstants {
       public static final double DEFAULT_RETRY_DELAY_FACTOR = 2.0;
       public static final String CONFIG_OF_MAX_RETRIES = "pinot.broker.failure.detector.max.retries";
       public static final int DEFAULT_MAX_RETRIES = 10;
+
+      // When true, the broker marks a server unhealthy after consecutive query timeouts
+      // (CONFIG_OF_TIMEOUT_FAILURE_THRESHOLD). Default false preserves the connection-failure-only
+      // circuit breaker used by mixed-version clusters.
+      public static final String CONFIG_OF_MARK_UNHEALTHY_ON_TIMEOUT =
+          "pinot.broker.failure.detector.mark.unhealthy.on.timeout";
+      public static final boolean DEFAULT_MARK_UNHEALTHY_ON_TIMEOUT = false;
+      public static final String CONFIG_OF_TIMEOUT_FAILURE_THRESHOLD =
+          "pinot.broker.failure.detector.timeout.failure.threshold";
+      public static final int DEFAULT_TIMEOUT_FAILURE_THRESHOLD = 3;
     }
 
     // Configs related to AdaptiveServerSelection.

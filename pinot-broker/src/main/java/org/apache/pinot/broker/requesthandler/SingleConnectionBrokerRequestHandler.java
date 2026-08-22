@@ -21,9 +21,11 @@ package org.apache.pinot.broker.requesthandler;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Maps;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
@@ -34,6 +36,7 @@ import org.apache.pinot.common.config.TlsConfig;
 import org.apache.pinot.common.config.provider.TableCache;
 import org.apache.pinot.common.datatable.DataTable;
 import org.apache.pinot.common.failuredetector.FailureDetector;
+import org.apache.pinot.common.failuredetector.QueryTimeoutCircuitBreaker;
 import org.apache.pinot.common.metrics.BrokerMeter;
 import org.apache.pinot.common.metrics.BrokerQueryPhase;
 import org.apache.pinot.common.request.BrokerRequest;
@@ -72,6 +75,7 @@ public class SingleConnectionBrokerRequestHandler extends BaseSingleStageBrokerR
   protected final BrokerReduceService _brokerReduceService;
   protected final QueryRouter _queryRouter;
   protected final FailureDetector _failureDetector;
+  protected final QueryTimeoutCircuitBreaker _timeoutCircuitBreaker;
 
   /// Legacy constructor without an MV handler — see [BaseSingleStageBrokerRequestHandler]'s
   /// legacy ctor for the rationale.  Delegates with `materializedViewHandler = null`.
@@ -99,6 +103,7 @@ public class SingleConnectionBrokerRequestHandler extends BaseSingleStageBrokerR
     _queryRouter = new QueryRouter(_brokerId, nettyConfig, tlsConfig, serverRoutingStatsManager, threadAccountant);
     _failureDetector = failureDetector;
     _failureDetector.registerUnhealthyServerRetrier(this::retryUnhealthyServer);
+    _timeoutCircuitBreaker = new QueryTimeoutCircuitBreaker(failureDetector, config);
   }
 
   @Override
@@ -153,9 +158,13 @@ public class SingleConnectionBrokerRequestHandler extends BaseSingleStageBrokerR
       if (dataTable != null) {
         dataTableMap.put(entry.getKey(), dataTable);
         totalResponseSize += serverResponse.getResponseSize();
+        _timeoutCircuitBreaker.recordSuccess(entry.getKey().getInstanceId());
       } else {
         serversNotResponded.add(entry.getKey());
       }
+    }
+    if (timedOut) {
+      recordTimeouts(serversNotResponded);
     }
     ScatterResultStats stats = new ScatterResultStats(
         dataTableMap.size() + serversNotResponded.size(), dataTableMap.size(), totalResponseSize);
@@ -271,6 +280,13 @@ public class SingleConnectionBrokerRequestHandler extends BaseSingleStageBrokerR
             totalResponseSizeHolder);
     long totalResponseSize = totalResponseSizeHolder[0];
     int numServersResponded = dataTableMap.size();
+    for (ServerRoutingInstance responded : dataTableMap.keySet()) {
+      _timeoutCircuitBreaker.recordSuccess(responded.getInstanceId());
+    }
+    if (baseAsyncResponse.getStatus() == QueryResponse.Status.TIMED_OUT
+        || materializedViewAsyncResponse.getStatus() == QueryResponse.Status.TIMED_OUT) {
+      recordTimeouts(serversNotResponded);
+    }
 
     /// On a SPLIT query, base and MV scatter-gathers cover DISJOINT halves of the timeline
     /// (base covers `ts < boundary`, MV covers `ts >= boundary`).  Partial failure on either
@@ -464,6 +480,17 @@ public class SingleConnectionBrokerRequestHandler extends BaseSingleStageBrokerR
   /// `equals()` matches) but with distinct `ServerRoutingInstance` instances — a regular HashMap
   /// would silently overwrite one DataTable with the other and produce under-counted results.
   ///
+  /// Deduplicates by instance id so an MV-split query that times out on both halves of the
+  /// same physical server increments the streak once, not twice.
+  private void recordTimeouts(List<ServerRoutingInstance> servers) {
+    Set<String> seen = new HashSet<>();
+    for (ServerRoutingInstance server : servers) {
+      if (seen.add(server.getInstanceId())) {
+        _timeoutCircuitBreaker.recordTimeout(server.getInstanceId(), server.getHostname());
+      }
+    }
+  }
+
   /// Package-private so the test suite can pin this contract without spinning up a broker.
   @VisibleForTesting
   static Map<ServerRoutingInstance, DataTable> mergeDataTablesByIdentity(
