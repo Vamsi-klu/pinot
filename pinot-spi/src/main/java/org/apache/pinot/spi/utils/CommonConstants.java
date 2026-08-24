@@ -799,6 +799,13 @@ public class CommonConstants {
         public static final String USE_MULTISTAGE_ENGINE = "useMultistageEngine";
         public static final String INFER_PARTITION_HINT = "inferPartitionHint";
         public static final String ENABLE_NULL_HANDLING = "enableNullHandling";
+        /**
+         * When true, aggregation-only DISTINCTCOUNT (and other PartitionedAggregationFunction
+         * implementations) union within a partition then sum across partitions. Requires a
+         * resolvable partition id on every segment; missing ids fail the query. Also enables
+         * serverReturnFinalResult so the broker sums Integer finals. Default false.
+         */
+        public static final String ENABLE_PARTITIONED_AGGREGATION = "enablePartitionedAggregation";
         public static final String APPLICATION_NAME = "applicationName";
         public static final String USE_SPOOLS = "useSpools";
         public static final String USE_PHYSICAL_OPTIMIZER = "usePhysicalOptimizer";

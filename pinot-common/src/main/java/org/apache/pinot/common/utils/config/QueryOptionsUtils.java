@@ -553,6 +553,10 @@ public class QueryOptionsUtils {
     return Boolean.parseBoolean(queryOptions.get(QueryOptionKey.ENABLE_NULL_HANDLING));
   }
 
+  public static boolean isEnablePartitionedAggregation(Map<String, String> queryOptions) {
+    return Boolean.parseBoolean(queryOptions.get(QueryOptionKey.ENABLE_PARTITIONED_AGGREGATION));
+  }
+
   public static boolean isServerReturnFinalResult(Map<String, String> queryOptions) {
     return Boolean.parseBoolean(queryOptions.get(QueryOptionKey.SERVER_RETURN_FINAL_RESULT));
   }
