@@ -36,27 +36,21 @@ public abstract class NullableSingleInputAggregationFunction<I, F extends Compar
     _nullHandlingEnabled = nullHandlingEnabled;
   }
 
-  /**
-   * A reducer that is being used to fold over consecutive indexes.
-   * @param <A>
-   */
+  /// A reducer that is being used to fold over consecutive indexes.
+  /// @param <A>
   @FunctionalInterface
   public interface Reducer<A> {
-    /**
-     * Applies the reducer to the range of indexes.
-     * @param acum the initial value of the accumulator
-     * @param fromInclusive the start index (inclusive)
-     * @param toExclusive the end index (exclusive)
-     * @return the next value of the accumulator (maybe the same as the input)
-     */
+    /// Applies the reducer to the range of indexes.
+    /// @param acum the initial value of the accumulator
+    /// @param fromInclusive the start index (inclusive)
+    /// @param toExclusive the end index (exclusive)
+    /// @return the next value of the accumulator (maybe the same as the input)
     A apply(A acum, int fromInclusive, int toExclusive);
   }
 
-  /**
-   * Iterates over the non-null ranges of the blockValSet and calls the consumer for each range.
-   * @param blockValSet the blockValSet to iterate over
-   * @param consumer the consumer to call for each non-null range
-   */
+  /// Iterates over the non-null ranges of the blockValSet and calls the consumer for each range.
+  /// @param blockValSet the blockValSet to iterate over
+  /// @param consumer the consumer to call for each non-null range
   public void forEachNotNull(int length, BlockValSet blockValSet, RoaringBitmapUtils.BatchConsumer consumer) {
     if (!_nullHandlingEnabled) {
       consumer.consume(0, length);
@@ -75,23 +69,19 @@ public abstract class NullableSingleInputAggregationFunction<I, F extends Compar
     }
   }
 
-  /**
-   * Folds over the non-null ranges of the blockValSet using the reducer. Returns {@code initialAcum} if the entire
-   * block is null.
-   *
-   * @param initialAcum the initial value of the accumulator
-   * @param <A> The type of the accumulator
-   */
+  /// Folds over the non-null ranges of the blockValSet using the reducer. Returns `initialAcum` if the entire
+  /// block is null.
+  ///
+  /// @param initialAcum the initial value of the accumulator
+  /// @param <A> The type of the accumulator
   public <A> A foldNotNull(int length, BlockValSet blockValSet, A initialAcum, Reducer<A> reducer) {
     return foldNotNull(length, _nullHandlingEnabled ? blockValSet.getNullBitmap() : null, initialAcum, reducer);
   }
 
-  /**
-   * Folds over the non-null ranges of the blockValSet using the reducer. Returns {@code initialAcum} if the entire
-   * block is null.
-   * @param initialAcum the initial value of the accumulator
-   * @param <A> The type of the accumulator
-   */
+  /// Folds over the non-null ranges of the blockValSet using the reducer. Returns `initialAcum` if the entire
+  /// block is null.
+  /// @param initialAcum the initial value of the accumulator
+  /// @param <A> The type of the accumulator
   public <A> A foldNotNull(int length, @Nullable RoaringBitmap roaringBitmap, A initialAcum, Reducer<A> reducer) {
     // Exit early if entire block is null
     if (_nullHandlingEnabled && roaringBitmap != null && roaringBitmap.contains(0, length)) {
@@ -102,13 +92,11 @@ public abstract class NullableSingleInputAggregationFunction<I, F extends Compar
     return foldNotNull(length, intIterator, initialAcum, reducer);
   }
 
-  /**
-   * Folds over the non-null ranges of the nullIndexIterator using the reducer.
-   * @param nullIndexIterator an int iterator that returns values in ascending order whose min value is 0.
-   *                          Rows are considered null if and only if their index is emitted.
-   * @param initialAcum the initial value of the accumulator
-   * @param <A> The type of the accumulator
-   */
+  /// Folds over the non-null ranges of the nullIndexIterator using the reducer.
+  /// @param nullIndexIterator an int iterator that returns values in ascending order whose min value is 0.
+  ///                          Rows are considered null if and only if their index is emitted.
+  /// @param initialAcum the initial value of the accumulator
+  /// @param <A> The type of the accumulator
   public <A> A foldNotNull(int length, @Nullable IntIterator nullIndexIterator, A initialAcum, Reducer<A> reducer) {
     A acum = initialAcum;
 
@@ -135,7 +123,13 @@ public abstract class NullableSingleInputAggregationFunction<I, F extends Compar
   }
 
   public IntIterator orNullIterator(BlockValSet valSet1, BlockValSet valSet2) {
-    if (!_nullHandlingEnabled) {
+    return orNullIterator(_nullHandlingEnabled, valSet1, valSet2);
+  }
+
+  /// Merges the null positions of two blocks without materializing a bitmap, for functions that pair a value from
+  /// each of two columns and so must skip a row when either side is null.
+  public static IntIterator orNullIterator(boolean nullHandlingEnabled, BlockValSet valSet1, BlockValSet valSet2) {
+    if (!nullHandlingEnabled) {
       return EmptyIntIterator.INSTANCE;
     } else {
       RoaringBitmap nullBlock1 = valSet1.getNullBitmap();
@@ -179,10 +173,8 @@ public abstract class NullableSingleInputAggregationFunction<I, F extends Compar
     private int _next1 = -1;
     private int _next2 = -1;
 
-    /**
-     * @param it1 it has to iterate in ascending order and the min value is 0
-     * @param it2 it has to iterate in ascending order and the min value is 0
-     */
+    /// @param it1 it has to iterate in ascending order and the min value is 0
+    /// @param it2 it has to iterate in ascending order and the min value is 0
     public MinIntIterator(IntIterator it1, IntIterator it2) {
       _it1 = it1;
       _it2 = it2;

@@ -38,6 +38,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import javax.annotation.Nullable;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.collections4.MapUtils;
 import org.apache.pinot.spi.utils.BooleanUtils;
 import org.apache.pinot.spi.utils.ByteArray;
 import org.apache.pinot.spi.utils.BytesUtils;
@@ -47,21 +49,19 @@ import org.apache.pinot.spi.utils.TimestampUtils;
 import org.apache.pinot.spi.utils.UuidUtils;
 
 
-/**
- * The <code>FieldSpec</code> class contains all specs related to any field (column) in {@link Schema}.
- * <p>Specs stored are as followings:
- * <ul>
- *   <li>"name": name of the field.</li>
- *   <li>"dataType": type of the data stored (e.g. INTEGER, LONG, FLOAT, DOUBLE, STRING).</li>
- *   <li>"singleValueField": single-value or multi-value field.</li>
- *   <li>"notNull": whether the column accepts nulls or not. Defaults to false (accepts nulls).</li>
- *   <li>"maxLength": maximum length of the column. Defaults to 512.</li>
- *   <li>"maxLengthExceedStrategy": the strategy to handle the case when the column exceeds the max length.</li>
- *   <li>"allowTrailingZeros": whether to allow trailing zeros for a BIG_DECIMAL column.</li>
- *   <li>"defaultNullValue": when no value found for this field, use this value.</li>
- *   <li>"virtualColumnProvider": the virtual column provider to use for this field.</li>
- * </ul>
- */
+/// The `FieldSpec` class contains all specs related to any field (column) in [Schema].
+///
+/// Specs stored are as followings:
+///
+/// - "name": name of the field.
+/// - "dataType": type of the data stored (e.g. INTEGER, LONG, FLOAT, DOUBLE, STRING).
+/// - "singleValueField": single-value or multi-value field.
+/// - "notNull": whether the column accepts nulls or not. Defaults to false (accepts nulls).
+/// - "maxLength": maximum length of the column. Defaults to 512.
+/// - "maxLengthExceedStrategy": the strategy to handle the case when the column exceeds the max length.
+/// - "allowTrailingZeros": whether to allow trailing zeros for a BIG_DECIMAL column.
+/// - "defaultNullValue": when no value found for this field, use this value.
+/// - "virtualColumnProvider": the virtual column provider to use for this field.
 @SuppressWarnings({"unused", "deprecation"})
 @JsonTypeInfo(
     use = JsonTypeInfo.Id.NAME,
@@ -172,6 +172,14 @@ public abstract class FieldSpec implements Comparable<FieldSpec>, Serializable {
   @Nullable
   protected List<String> _aliases;
 
+  // Optional, free-form per-column metadata. It is additive, excluded from backward-compatibility
+  // checks, and omitted from serialization when unset/empty. The keys and their interpretation are
+  // defined by whoever populates it; the core schema attaches no semantics to it.
+  @JsonProperty("metadata")
+  @JsonInclude(JsonInclude.Include.NON_EMPTY)
+  @Nullable
+  protected Map<String, String> _metadata;
+
   protected String _name;
   protected DataType _dataType;
   protected boolean _singleValueField = true;
@@ -249,7 +257,7 @@ public abstract class FieldSpec implements Comparable<FieldSpec>, Serializable {
   }
 
   public void setTags(@Nullable List<String> tags) {
-    _tags = tags;
+    _tags = CollectionUtils.isEmpty(tags) ? null : tags;
   }
 
   @Nullable
@@ -267,7 +275,16 @@ public abstract class FieldSpec implements Comparable<FieldSpec>, Serializable {
   }
 
   public void setAliases(@Nullable List<String> aliases) {
-    _aliases = aliases == null || aliases.isEmpty() ? null : aliases;
+    _aliases = CollectionUtils.isEmpty(aliases) ? null : aliases;
+  }
+
+  @Nullable
+  public Map<String, String> getMetadata() {
+    return _metadata;
+  }
+
+  public void setMetadata(@Nullable Map<String, String> metadata) {
+    _metadata = MapUtils.isEmpty(metadata) ? null : metadata;
   }
 
   public DataType getDataType() {
@@ -289,17 +306,13 @@ public abstract class FieldSpec implements Comparable<FieldSpec>, Serializable {
     _singleValueField = isSingleValueField;
   }
 
-  /**
-   * Returns whether the column is nullable or not.
-   */
+  /// Returns whether the column is nullable or not.
   @JsonIgnore
   public boolean isNullable() {
     return !_notNull;
   }
 
-  /**
-   * @see #isNullable()
-   */
+  /// @see #isNullable()
   @JsonIgnore
   public void setNullable(Boolean nullable) {
     _notNull = !nullable;
@@ -314,11 +327,9 @@ public abstract class FieldSpec implements Comparable<FieldSpec>, Serializable {
     _notNull = notNull;
   }
 
-  /**
-   * Returns the effective max length to be used.
-   * This method should be used in business logic instead of {@code getMaxLength()},
-   * as it falls back to data type-specific or global defaults when the field is unset.
-   */
+  /// Returns the effective max length to be used.
+  /// This method should be used in business logic instead of `getMaxLength()`,
+  /// as it falls back to data type-specific or global defaults when the field is unset.
   @JsonIgnore
   public int getEffectiveMaxLength() {
     // If explicitly set, return that value
@@ -356,11 +367,9 @@ public abstract class FieldSpec implements Comparable<FieldSpec>, Serializable {
     _maxLength = maxLength;
   }
 
-  /**
-   * Returns the effective max length exceed strategy to be used.
-   * This method should be used in business logic instead of {@code getMaxLengthExceedStrategy()},
-   * as it falls back to data type-specific or global defaults when the field is unset.
-   */
+  /// Returns the effective max length exceed strategy to be used.
+  /// This method should be used in business logic instead of `getMaxLengthExceedStrategy()`,
+  /// as it falls back to data type-specific or global defaults when the field is unset.
   @JsonIgnore
   public MaxLengthExceedStrategy getEffectiveMaxLengthExceedStrategy() {
     if (_maxLengthExceedStrategy != null) {
@@ -543,18 +552,14 @@ public abstract class FieldSpec implements Comparable<FieldSpec>, Serializable {
     }
   }
 
-  /**
-   * Transform function if defined else null.
-   * Deprecated. Use TableConfig -> IngestionConfig -> TransformConfigs
-   */
+  /// Transform function if defined else null.
+  /// Deprecated. Use TableConfig -> IngestionConfig -> TransformConfigs
   @Deprecated
   public String getTransformFunction() {
     return _transformFunction;
   }
 
-  /**
-   * Deprecated. Use TableConfig -> IngestionConfig -> TransformConfigs
-   */
+  /// Deprecated. Use TableConfig -> IngestionConfig -> TransformConfigs
   // Required by JSON de-serializer. DO NOT REMOVE.
   @Deprecated
   public void setTransformFunction(@Nullable String transformFunction) {
@@ -570,21 +575,20 @@ public abstract class FieldSpec implements Comparable<FieldSpec>, Serializable {
     _virtualColumnProvider = virtualColumnProvider;
   }
 
-  /**
-   * Returns whether the column is virtual. Virtual columns are constructed while loading the segment, thus do not exist
-   * in the record, nor should be persisted to the disk.
-   * <p>Identify a column as virtual if the virtual column provider is configured.
-   */
+  /// Returns whether the column is virtual. Virtual columns are constructed while loading the segment, thus do not
+  /// exist in the record, nor should be persisted to the disk.
+  ///
+  /// Identify a column as virtual if the virtual column provider is configured.
   @JsonIgnore
   public boolean isVirtualColumn() {
     return _virtualColumnProvider != null && !_virtualColumnProvider.isEmpty();
   }
 
-  /**
-   * Returns the {@link ObjectNode} representing the field spec.
-   * <p>Only contains fields with non-default value.
-   * <p>NOTE: here we use {@link ObjectNode} to preserve the insertion order.
-   */
+  /// Returns the [ObjectNode] representing the field spec.
+  ///
+  /// Only contains fields with non-default value.
+  ///
+  /// NOTE: here we use [ObjectNode] to preserve the insertion order.
   public ObjectNode toJsonObject() {
     ObjectNode jsonObject = JsonUtils.newObjectNode();
     jsonObject.put("name", _name);
@@ -624,7 +628,7 @@ public abstract class FieldSpec implements Comparable<FieldSpec>, Serializable {
     return jsonObject;
   }
 
-  /// Appends `fieldId` and `aliases` (when set) to the given JSON object.
+  /// Appends `fieldId`, `aliases`, and `metadata` (when set) to the given JSON object.
   ///
   /// Subclasses that build JSON without calling [FieldSpec#toJsonObject()], such as [TimeFieldSpec], use this helper
   /// to preserve these fields during schema round-trip serialization.
@@ -638,6 +642,12 @@ public abstract class FieldSpec implements Comparable<FieldSpec>, Serializable {
         aliasesArray.add(alias);
       }
       jsonObject.set("aliases", aliasesArray);
+    }
+    if (MapUtils.isNotEmpty(_metadata)) {
+      ObjectNode metadataNode = jsonObject.putObject("metadata");
+      for (Map.Entry<String, String> entry : _metadata.entrySet()) {
+        metadataNode.put(entry.getKey(), entry.getValue());
+      }
     }
   }
 
@@ -716,25 +726,28 @@ public abstract class FieldSpec implements Comparable<FieldSpec>, Serializable {
         && Objects.equals(_description, that._description)
         && Objects.equals(_tags, that._tags)
         && Objects.equals(_fieldId, that._fieldId)
-        && Objects.equals(_aliases, that._aliases);
+        && Objects.equals(_aliases, that._aliases)
+        && Objects.equals(_metadata, that._metadata);
   }
 
   @Override
   public int hashCode() {
     return Objects.hash(_name, _dataType, _singleValueField, _notNull, _maxLength, _maxLengthExceedStrategy,
         _allowTrailingZeros, _dataType.hashCode(_defaultNullValue), _transformFunction, _virtualColumnProvider,
-        _description, _tags, _fieldId, _aliases);
+        _description, _tags, _fieldId, _aliases, _metadata);
   }
 
-  /**
-   * The <code>FieldType</code> enum is used to demonstrate the real world business logic for a column.
-   * <p><code>DIMENSION</code>: columns used to filter records.
-   * <p><code>METRIC</code>: columns used to apply aggregation on. <code>METRIC</code> field only contains numeric data.
-   * <p><code>TIME</code>: time column (at most one per {@link Schema}). <code>TIME</code> field can be used to prune
-   * <p><code>DATE_TIME</code>: time column (at most one per {@link Schema}). <code>TIME</code> field can be used to
-   * prune
-   * segments, otherwise treated the same as <code>DIMENSION</code> field.
-   */
+  /// The `FieldType` enum is used to demonstrate the real world business logic for a column.
+  ///
+  /// `DIMENSION`: columns used to filter records.
+  ///
+  /// `METRIC`: columns used to apply aggregation on. `METRIC` field only contains numeric data.
+  ///
+  /// `TIME`: time column (at most one per [Schema]). `TIME` field can be used to prune
+  ///
+  /// `DATE_TIME`: time column (at most one per [Schema]). `TIME` field can be used to
+  /// prune
+  /// segments, otherwise treated the same as `DIMENSION` field.
   public enum FieldType {
     DIMENSION, METRIC, TIME, DATE_TIME, COMPLEX
   }
@@ -809,27 +822,23 @@ public abstract class FieldSpec implements Comparable<FieldSpec>, Serializable {
       _numeric = numeric;
     }
 
-    /**
-     * Returns the data type stored in Pinot.
-     * <p>Pinot internally stores data (physical) in INT, LONG, FLOAT, DOUBLE, STRING, BYTES type, other data types
-     * (logical) will be stored as one of these types.
-     * <p>Stored type should be used when reading the physical stored values from Dictionary, Forward Index etc.
-     */
+    /// Returns the data type stored in Pinot.
+    ///
+    /// Pinot internally stores data (physical) in INT, LONG, FLOAT, DOUBLE, STRING, BYTES type, other data types
+    /// (logical) will be stored as one of these types.
+    ///
+    /// Stored type should be used when reading the physical stored values from Dictionary, Forward Index etc.
     public DataType getStoredType() {
       return _storedType;
     }
 
-    /**
-     * Returns {@code true} if the data type is of fixed width (INT, LONG, FLOAT, DOUBLE, BOOLEAN, TIMESTAMP),
-     * {@code false} otherwise.
-     */
+    /// Returns `true` if the data type is of fixed width (INT, LONG, FLOAT, DOUBLE, BOOLEAN, TIMESTAMP),
+    /// `false` otherwise.
     public boolean isFixedWidth() {
       return _size >= 0;
     }
 
-    /**
-     * Returns the number of bytes needed to store the data type.
-     */
+    /// Returns the number of bytes needed to store the data type.
     public int size() {
       if (_size >= 0) {
         return _size;
@@ -837,24 +846,18 @@ public abstract class FieldSpec implements Comparable<FieldSpec>, Serializable {
       throw new IllegalStateException("Cannot get number of bytes for: " + this);
     }
 
-    /**
-     * Returns {@code true} if the data type is numeric (INT, LONG, FLOAT, DOUBLE, BIG_DECIMAL), {@code false}
-     * otherwise.
-     */
+    /// Returns `true` if the data type is numeric (INT, LONG, FLOAT, DOUBLE, BIG_DECIMAL), `false`
+    /// otherwise.
     public boolean isNumeric() {
       return _numeric;
     }
 
-    /**
-     * Returns {@code true} if the data type is unknown, {@code false} otherwise.
-     */
+    /// Returns `true` if the data type is unknown, `false` otherwise.
     public boolean isUnknown() {
       return _storedType == UNKNOWN;
     }
 
-    /**
-     * Converts the given string value to the data type. Returns byte[] for BYTES and UUID.
-     */
+    /// Converts the given string value to the data type. Returns byte\[\] for BYTES and UUID.
     public Object convert(String value) {
       try {
         switch (this) {
@@ -900,13 +903,11 @@ public abstract class FieldSpec implements Comparable<FieldSpec>, Serializable {
       return this == BYTES || this == UUID ? Arrays.hashCode((byte[]) value) : value.hashCode();
     }
 
-    /**
-     * Compares the given values of the data type.
-     *
-     * return 0 if the values are equal
-     * return -1 if value1 is less than value2
-     * return 1 if value1 is greater than value2
-     */
+    /// Compares the given values of the data type.
+    ///
+    /// return 0 if the values are equal
+    /// return -1 if value1 is less than value2
+    /// return 1 if value1 is greater than value2
     public int compare(Object value1, Object value2) {
       switch (this) {
         case INT:
@@ -936,9 +937,7 @@ public abstract class FieldSpec implements Comparable<FieldSpec>, Serializable {
       }
     }
 
-    /**
-     * Converts the given value of the data type to string. The input value for BYTES/UUID should be byte[].
-     */
+    /// Converts the given value of the data type to string. The input value for BYTES/UUID should be byte\[\].
     public String toString(Object value) {
       if (this == BIG_DECIMAL) {
         return ((BigDecimal) value).toPlainString();
@@ -959,9 +958,7 @@ public abstract class FieldSpec implements Comparable<FieldSpec>, Serializable {
       return value.toString();
     }
 
-    /**
-     * Converts the given string value to the data type. Returns ByteArray for BYTES and UUID.
-     */
+    /// Converts the given string value to the data type. Returns ByteArray for BYTES and UUID.
     public Comparable convertInternal(String value) {
       try {
         switch (this) {
@@ -1005,14 +1002,13 @@ public abstract class FieldSpec implements Comparable<FieldSpec>, Serializable {
     return _name.compareTo(otherSpec._name);
   }
 
-  /***
-   * Return true if it is backward compatible with the old FieldSpec.
-   * Backward compatibility requires
-   * all other fields except DefaultNullValue and Max Length should be retained.
-   *
-   * @param oldFieldSpec
-   * @return
-   */
+  /// *
+  /// Return true if it is backward compatible with the old FieldSpec.
+  /// Backward compatibility requires
+  /// all other fields except DefaultNullValue and Max Length should be retained.
+  ///
+  /// @param oldFieldSpec
+  /// @return
   public boolean isBackwardCompatibleWith(FieldSpec oldFieldSpec) {
     return EqualityUtils.isEqual(_name, oldFieldSpec._name)
         && EqualityUtils.isEqual(_dataType, oldFieldSpec._dataType)
