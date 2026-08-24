@@ -20,11 +20,14 @@ package org.apache.pinot.common.request.context;
 
 import java.math.BigDecimal;
 import java.sql.Timestamp;
+import java.util.List;
+import java.util.UUID;
 import org.apache.pinot.common.request.Literal;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.apache.pinot.spi.utils.BigDecimalUtils;
 import org.apache.pinot.spi.utils.BytesUtils;
 import org.apache.pinot.spi.utils.CommonConstants.NullValuePlaceHolder;
+import org.apache.pinot.spi.utils.UuidUtils;
 import org.testng.annotations.Test;
 
 import static org.testng.Assert.*;
@@ -209,6 +212,16 @@ public class LiteralContextTest {
   }
 
   @Test
+  public void testStringArrayLiteral() {
+    LiteralContext literalContext = new LiteralContext(Literal.stringArrayValue(List.of("foo", "bar")));
+
+    assertFalse(literalContext.isSingleValue());
+    assertEquals(literalContext.getType(), DataType.STRING);
+    assertEquals(literalContext.getValue(), new String[]{"foo", "bar"});
+    assertEquals(literalContext.toString(), "'[foo, bar]'");
+  }
+
+  @Test
   public void testBytesLiteral() {
     LiteralContext literalContext = new LiteralContext(DataType.BYTES, BytesUtils.toBytes("deadbeef"));
     assertThrows(literalContext::getBooleanValue);
@@ -221,5 +234,14 @@ public class LiteralContextTest {
     assertEquals(literalContext.getBytesValue(), BytesUtils.toBytes("deadbeef"));
     assertFalse(literalContext.isNull());
     assertEquals(literalContext.toString(), "'deadbeef'");
+  }
+
+  @Test
+  public void testUuidLiteral() {
+    UUID uuid = UUID.fromString("550e8400-e29b-41d4-a716-446655440000");
+    LiteralContext literalContext = new LiteralContext(DataType.UUID, uuid);
+
+    assertEquals(literalContext.getStringValue(), uuid.toString());
+    assertEquals(literalContext.getBytesValue(), UuidUtils.toBytes(uuid));
   }
 }
