@@ -52,18 +52,15 @@ import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.apache.pinot.spi.exception.BadQueryRequestException;
 
 
-/**
- * Factory class to create instances of aggregation function of the given name.
- */
+/// Factory class to create instances of aggregation function of the given name.
 @SuppressWarnings("rawtypes")
 public class AggregationFunctionFactory {
   private AggregationFunctionFactory() {
   }
 
-  /**
-   * Given the function information, returns a new instance of the corresponding aggregation function.
-   * <p>NOTE: Underscores in the function name are ignored.
-   */
+  /// Given the function information, returns a new instance of the corresponding aggregation function.
+  ///
+  /// NOTE: Underscores in the function name are ignored.
   public static AggregationFunction getAggregationFunction(FunctionContext function, boolean nullHandlingEnabled) {
     try {
       String upperCaseFunctionName =
@@ -80,13 +77,13 @@ public class AggregationFunctionFactory {
           return new PercentileKLLAggregationFunction(arguments, nullHandlingEnabled);
         }
         if (remainingFunctionName.equals("KLLMV")) {
-          return new PercentileKLLMVAggregationFunction(arguments);
+          return new PercentileKLLMVAggregationFunction(arguments, nullHandlingEnabled);
         }
         if (remainingFunctionName.equals("RAWKLL")) {
           return new PercentileRawKLLAggregationFunction(arguments, nullHandlingEnabled);
         }
         if (remainingFunctionName.equals("RAWKLLMV")) {
-          return new PercentileRawKLLMVAggregationFunction(arguments);
+          return new PercentileRawKLLMVAggregationFunction(arguments, nullHandlingEnabled);
         }
         if (numArguments == 1) {
           // Single argument percentile (e.g. Percentile99(foo), PercentileTDigest95(bar), etc.)
@@ -118,23 +115,28 @@ public class AggregationFunctionFactory {
           } else if (remainingFunctionName.matches("\\d+MV")) {
             // PercentileMV
             String percentileString = remainingFunctionName.substring(0, remainingFunctionName.length() - 2);
-            return new PercentileMVAggregationFunction(firstArgument, parsePercentileToInt(percentileString));
+            return new PercentileMVAggregationFunction(firstArgument, parsePercentileToInt(percentileString),
+                nullHandlingEnabled);
           } else if (remainingFunctionName.matches("EST\\d+MV")) {
             // PercentileEstMV
             String percentileString = remainingFunctionName.substring(3, remainingFunctionName.length() - 2);
-            return new PercentileEstMVAggregationFunction(firstArgument, parsePercentileToInt(percentileString));
+            return new PercentileEstMVAggregationFunction(firstArgument, parsePercentileToInt(percentileString),
+                nullHandlingEnabled);
           } else if (remainingFunctionName.matches("RAWEST\\d+MV")) {
             // PercentileRawEstMV
             String percentileString = remainingFunctionName.substring(6, remainingFunctionName.length() - 2);
-            return new PercentileRawEstMVAggregationFunction(firstArgument, parsePercentileToInt(percentileString));
+            return new PercentileRawEstMVAggregationFunction(firstArgument, parsePercentileToInt(percentileString),
+                nullHandlingEnabled);
           } else if (remainingFunctionName.matches("TDIGEST\\d+MV")) {
             // PercentileTDigestMV
             String percentileString = remainingFunctionName.substring(7, remainingFunctionName.length() - 2);
-            return new PercentileTDigestMVAggregationFunction(firstArgument, parsePercentileToInt(percentileString));
+            return new PercentileTDigestMVAggregationFunction(firstArgument, parsePercentileToInt(percentileString),
+                nullHandlingEnabled);
           } else if (remainingFunctionName.matches("RAWTDIGEST\\d+MV")) {
             // PercentileRawTDigestMV
             String percentileString = remainingFunctionName.substring(10, remainingFunctionName.length() - 2);
-            return new PercentileRawTDigestMVAggregationFunction(firstArgument, parsePercentileToInt(percentileString));
+            return new PercentileRawTDigestMVAggregationFunction(firstArgument, parsePercentileToInt(percentileString),
+                nullHandlingEnabled);
           }
         } else if (numArguments == 2) {
           // Double arguments percentile (e.g. percentile(foo, 99), percentileTDigest(bar, 95), etc.) where the
@@ -163,23 +165,23 @@ public class AggregationFunctionFactory {
           }
           if (remainingFunctionName.equals("MV")) {
             // PercentileMV
-            return new PercentileMVAggregationFunction(firstArgument, percentile);
+            return new PercentileMVAggregationFunction(firstArgument, percentile, nullHandlingEnabled);
           }
           if (remainingFunctionName.equals("ESTMV")) {
             // PercentileEstMV
-            return new PercentileEstMVAggregationFunction(firstArgument, percentile);
+            return new PercentileEstMVAggregationFunction(firstArgument, percentile, nullHandlingEnabled);
           }
           if (remainingFunctionName.equals("RAWESTMV")) {
             // PercentileRawEstMV
-            return new PercentileRawEstMVAggregationFunction(firstArgument, percentile);
+            return new PercentileRawEstMVAggregationFunction(firstArgument, percentile, nullHandlingEnabled);
           }
           if (remainingFunctionName.equals("TDIGESTMV")) {
             // PercentileTDigestMV
-            return new PercentileTDigestMVAggregationFunction(firstArgument, percentile);
+            return new PercentileTDigestMVAggregationFunction(firstArgument, percentile, nullHandlingEnabled);
           }
           if (remainingFunctionName.equals("RAWTDIGESTMV")) {
             // PercentileRawTDigestMV
-            return new PercentileRawTDigestMVAggregationFunction(firstArgument, percentile);
+            return new PercentileRawTDigestMVAggregationFunction(firstArgument, percentile, nullHandlingEnabled);
           }
         } else if (numArguments == 3) {
           // Triple arguments percentile (e.g. percentileTDigest(bar, 95, 1000), etc.) where the
@@ -203,11 +205,13 @@ public class AggregationFunctionFactory {
           }
           if (remainingFunctionName.equals("TDIGESTMV")) {
             // PercentileTDigestMV
-            return new PercentileTDigestMVAggregationFunction(firstArgument, percentile, compressionFactor);
+            return new PercentileTDigestMVAggregationFunction(firstArgument, percentile, compressionFactor,
+                nullHandlingEnabled);
           }
           if (remainingFunctionName.equals("RAWTDIGESTMV")) {
             // PercentileRawTDigestMV
-            return new PercentileRawTDigestMVAggregationFunction(firstArgument, percentile, compressionFactor);
+            return new PercentileRawTDigestMVAggregationFunction(firstArgument, percentile, compressionFactor,
+                nullHandlingEnabled);
           }
         }
         throw new IllegalArgumentException("Invalid percentile function: " + function);
@@ -392,25 +396,25 @@ public class AggregationFunctionFactory {
           case DISTINCTCOUNTOFFHEAP:
             return new DistinctCountOffHeapAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTCOUNTBITMAP:
-            return new DistinctCountBitmapAggregationFunction(arguments);
+            return new DistinctCountBitmapAggregationFunction(arguments, nullHandlingEnabled);
           case SEGMENTPARTITIONEDDISTINCTCOUNT:
-            return new SegmentPartitionedDistinctCountAggregationFunction(arguments);
+            return new SegmentPartitionedDistinctCountAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTCOUNTHLL:
-            return new DistinctCountHLLAggregationFunction(arguments);
+            return new DistinctCountHLLAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTCOUNTRAWHLL:
-            return new DistinctCountRawHLLAggregationFunction(arguments);
+            return new DistinctCountRawHLLAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTCOUNTSMARTHLL:
-            return new DistinctCountSmartHLLAggregationFunction(arguments);
+            return new DistinctCountSmartHLLAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTCOUNTSMARTHLLPLUS:
-            return new DistinctCountSmartHLLPlusAggregationFunction(arguments);
+            return new DistinctCountSmartHLLPlusAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTCOUNTSMARTULL:
-            return new DistinctCountSmartULLAggregationFunction(arguments);
+            return new DistinctCountSmartULLAggregationFunction(arguments, nullHandlingEnabled);
           case FASTHLL:
-            return new FastHLLAggregationFunction(arguments);
+            return new FastHLLAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTCOUNTTHETASKETCH:
-            return new DistinctCountThetaSketchAggregationFunction(arguments);
+            return new DistinctCountThetaSketchAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTCOUNTRAWTHETASKETCH:
-            return new DistinctCountRawThetaSketchAggregationFunction(arguments);
+            return new DistinctCountRawThetaSketchAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTSUM:
             return new DistinctSumAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTAVG:
@@ -430,33 +434,33 @@ public class AggregationFunctionFactory {
           case MINMAXRANGEMV:
             return new MinMaxRangeMVAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTCOUNTMV:
-            return new DistinctCountMVAggregationFunction(arguments);
+            return new DistinctCountMVAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTCOUNTBITMAPMV:
-            return new DistinctCountBitmapMVAggregationFunction(arguments);
+            return new DistinctCountBitmapMVAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTCOUNTHLLMV:
-            return new DistinctCountHLLMVAggregationFunction(arguments);
+            return new DistinctCountHLLMVAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTCOUNTRAWHLLMV:
-            return new DistinctCountRawHLLMVAggregationFunction(arguments);
+            return new DistinctCountRawHLLMVAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTCOUNTHLLPLUS:
-            return new DistinctCountHLLPlusAggregationFunction(arguments);
+            return new DistinctCountHLLPlusAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTCOUNTRAWHLLPLUS:
-            return new DistinctCountRawHLLPlusAggregationFunction(arguments);
+            return new DistinctCountRawHLLPlusAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTCOUNTHLLPLUSMV:
-            return new DistinctCountHLLPlusMVAggregationFunction(arguments);
+            return new DistinctCountHLLPlusMVAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTCOUNTRAWHLLPLUSMV:
-            return new DistinctCountRawHLLPlusMVAggregationFunction(arguments);
+            return new DistinctCountRawHLLPlusMVAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTSUMMV:
-            return new DistinctSumMVAggregationFunction(arguments);
+            return new DistinctSumMVAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTAVGMV:
-            return new DistinctAvgMVAggregationFunction(arguments);
+            return new DistinctAvgMVAggregationFunction(arguments, nullHandlingEnabled);
           case STUNION:
             return new StUnionAggregationFunction(arguments);
           case HISTOGRAM:
             return new HistogramAggregationFunction(arguments);
           case COVARPOP:
-            return new CovarianceAggregationFunction(arguments, false);
+            return new CovarianceAggregationFunction(arguments, false, nullHandlingEnabled);
           case COVARSAMP:
-            return new CovarianceAggregationFunction(arguments, true);
+            return new CovarianceAggregationFunction(arguments, true, nullHandlingEnabled);
           case BOOLAND:
             return new BooleanAndAggregationFunction(arguments, nullHandlingEnabled);
           case BOOLOR:
@@ -477,13 +481,16 @@ public class AggregationFunctionFactory {
             return new FourthMomentAggregationFunction(arguments, FourthMomentAggregationFunction.Type.MOMENT);
           case DISTINCTCOUNTTUPLESKETCH:
             // mode actually doesn't matter here because we only care about keys, not values
-            return new DistinctCountIntegerTupleSketchAggregationFunction(arguments, IntegerSummary.Mode.Sum);
+            return new DistinctCountIntegerTupleSketchAggregationFunction(arguments, IntegerSummary.Mode.Sum,
+                nullHandlingEnabled);
           case DISTINCTCOUNTRAWINTEGERSUMTUPLESKETCH:
-            return new IntegerTupleSketchAggregationFunction(arguments, IntegerSummary.Mode.Sum);
+            return new IntegerTupleSketchAggregationFunction(arguments, IntegerSummary.Mode.Sum, nullHandlingEnabled);
           case SUMVALUESINTEGERSUMTUPLESKETCH:
-            return new SumValuesIntegerTupleSketchAggregationFunction(arguments, IntegerSummary.Mode.Sum);
+            return new SumValuesIntegerTupleSketchAggregationFunction(arguments, IntegerSummary.Mode.Sum,
+                nullHandlingEnabled);
           case AVGVALUEINTEGERSUMTUPLESKETCH:
-            return new AvgValueIntegerTupleSketchAggregationFunction(arguments, IntegerSummary.Mode.Sum);
+            return new AvgValueIntegerTupleSketchAggregationFunction(arguments, IntegerSummary.Mode.Sum,
+                nullHandlingEnabled);
           case PINOTPARENTAGGEXPRMAX:
             return new ParentExprMinMaxAggregationFunction(arguments, true);
           case PINOTPARENTAGGEXPRMIN:
@@ -509,17 +516,17 @@ public class AggregationFunctionFactory {
           case FUNNELEVENTSFUNCTIONEVAL:
             return new FunnelEventsFunctionEvalAggregationFunction(arguments);
           case FREQUENTSTRINGSSKETCH:
-            return new FrequentStringsSketchAggregationFunction(arguments);
+            return new FrequentStringsSketchAggregationFunction(arguments, nullHandlingEnabled);
           case FREQUENTLONGSSKETCH:
-            return new FrequentLongsSketchAggregationFunction(arguments);
+            return new FrequentLongsSketchAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTCOUNTCPCSKETCH:
-            return new DistinctCountCPCSketchAggregationFunction(arguments);
+            return new DistinctCountCPCSketchAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTCOUNTRAWCPCSKETCH:
-            return new DistinctCountRawCPCSketchAggregationFunction(arguments);
+            return new DistinctCountRawCPCSketchAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTCOUNTULL:
-            return new DistinctCountULLAggregationFunction(arguments);
+            return new DistinctCountULLAggregationFunction(arguments, nullHandlingEnabled);
           case DISTINCTCOUNTRAWULL:
-            return new DistinctCountRawULLAggregationFunction(arguments);
+            return new DistinctCountRawULLAggregationFunction(arguments, nullHandlingEnabled);
           case TIMESERIESAGGREGATE:
             return new TimeSeriesAggregationFunction(arguments);
           default:
