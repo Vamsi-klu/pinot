@@ -25,6 +25,15 @@ import org.apache.pinot.spi.annotations.InterfaceAudience;
 import org.apache.pinot.spi.annotations.InterfaceStability;
 
 
+/// Controller access-control SPI.
+///
+/// Custom implementations should audit two resolution changes from apache/pinot#18975:
+/// 1. A table name appended as an undeclared query parameter no longer reaches
+///    [#hasAccess(String, AccessType, HttpHeaders, String)]; the request arrives with a `null`
+///    table name and must be treated as cluster-wide.
+/// 2. [org.apache.pinot.core.auth.FineGrainedAuthUtils#findRawTargetId] changed from 3 arguments
+///    (`Authorize`, path map, query map) to 4 by adding the resource `Method`. There is no
+///    overload; a plugin calling the old signature will fail to link.
 @InterfaceAudience.Public
 @InterfaceStability.Stable
 public interface AccessControl extends FineGrainedAccessControl {
@@ -33,7 +42,13 @@ public interface AccessControl extends FineGrainedAccessControl {
 
   /// Return whether the client has permission to the given table
   ///
-  /// @param tableName name of the table to be accessed
+  /// A `null` table name means the endpoint named no table — either it declares no table parameter, or the request
+  /// omitted an optional one — so the request addresses the cluster rather than a table. Implementations must apply
+  /// their cluster policy in that case; returning `true` for a `null` table name grants every cluster endpoint.
+  /// Note that a caller-supplied query parameter only names the table when the endpoint declares it, so a table name
+  /// appended to a cluster endpoint arrives here as `null`.
+  ///
+  /// @param tableName name of the table to be accessed, or `null` when the request names no table
   /// @param accessType type of the access
   /// @param httpHeaders HTTP headers containing requester identity
   /// @param endpointUrl the request url for which this access control is called
@@ -44,6 +59,10 @@ public interface AccessControl extends FineGrainedAccessControl {
   }
 
   /// Return whether the client has permission to access the endpoints with are not table level
+  ///
+  /// This is the cluster-wide gate. The request named no table, so it may reach state belonging to any table: grant it
+  /// only to a principal whose authority spans the whole cluster, never to one scoped to a subset of tables. Granting
+  /// it on a narrower scope is what made table-scoped users able to drive cluster endpoints in apache/pinot#14595.
   ///
   /// @param accessType type of the access
   /// @param httpHeaders HTTP headers
