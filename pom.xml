@@ -187,7 +187,7 @@
     <bson.version>5.10.0</bson.version>
     <parquet.version>1.18.0</parquet.version>
     <orc.version>1.9.9</orc.version>
-    <hive.version>2.8.1</hive.version>
+    <hive.version>4.2.1</hive.version>
     <helix.version>2.0.1</helix.version>
     <zkclient.version>0.11</zkclient.version>
     <jackson.version>2.22.2</jackson.version>
@@ -197,7 +197,7 @@
     <jersey.version>2.48</jersey.version>
     <hk2.version>2.6.1</hk2.version>
     <swagger.version>1.6.16</swagger.version>
-    <swagger-ui.version>5.32.13</swagger-ui.version>
+    <swagger-ui.version>5.32.14</swagger-ui.version>
     <hadoop.version>3.4.3</hadoop.version>
     <jsonpath.version>2.10.0</jsonpath.version>
     <jsonsmart.version>2.6.0</jsonsmart.version>
@@ -227,15 +227,15 @@
     <audienceannotations.version>0.15.1</audienceannotations.version>
     <clp-ffi.version>0.4.7</clp-ffi.version>
     <stax2-api.version>4.3.0</stax2-api.version>
-    <aws.sdk.version>2.53.1</aws.sdk.version>
+    <aws.sdk.version>2.54.2</aws.sdk.version>
     <azure.sdk.version>1.3.7</azure.sdk.version>
-    <azure.msal4j.version>1.25.1</azure.msal4j.version>
+    <azure.msal4j.version>1.26.0</azure.msal4j.version>
     <joda-time.version>2.14.3</joda-time.version>
     <janino.version>3.1.12</janino.version>
     <ayza.version>10.0.6</ayza.version>
     <jbcrypt.version>0.4</jbcrypt.version>
     <scala-xml.version>2.4.0</scala-xml.version>
-    <plexus-classworlds.version>2.12.0</plexus-classworlds.version>
+    <plexus-classworlds.version>2.12.1</plexus-classworlds.version>
     <protobuf-dynamic.version>1.0.1</protobuf-dynamic.version>
     <localstack-utils.version>0.2.23</localstack-utils.version>
     <checker-qual.version>4.2.2</checker-qual.version>
@@ -299,7 +299,7 @@
     <httpcore5.version>5.4.3</httpcore5.version>
 
     <!-- Google Libraries -->
-    <protobuf.version>4.35.1</protobuf.version>
+    <protobuf.version>4.36.0</protobuf.version>
     <grpc.version>1.83.1</grpc.version>
     <google.cloud.libraries.version>26.86.0</google.cloud.libraries.version>
     <opentelemetry.gcp.resources.version>1.59.0-alpha</opentelemetry.gcp.resources.version>
@@ -319,8 +319,8 @@
     <enforcer-api.version>3.6.3</enforcer-api.version>
     <maven.version>3.9.16</maven.version>
     <jdom2.version>2.0.6.1</jdom2.version>
-    <plexus-utils.version>4.0.3</plexus-utils.version>
-    <plexus-xml.version>3.0.2</plexus-xml.version>
+    <plexus-utils.version>4.1.0</plexus-utils.version>
+    <plexus-xml.version>3.1.0</plexus-xml.version>
 
     <!-- For maven-antrun-plugin -->
     <fmpp.version>0.9.16</fmpp.version>
@@ -339,7 +339,7 @@
     <bouncycastle.version>1.85</bouncycastle.version>
     <aircompressor.version>2.0.3</aircompressor.version>
     <jna.version>5.19.1</jna.version>
-    <jnr-ffi.version>2.3.0</jnr-ffi.version>
+    <jnr-ffi.version>2.3.1</jnr-ffi.version>
     <jnr-constants.version>0.11.0</jnr-constants.version>
     <asm.version>9.10.1</asm.version>
     <paranamer.version>2.8.3</paranamer.version>
@@ -362,7 +362,7 @@
     <equalsverifier.version>3.19.4</equalsverifier.version>
     <testcontainers.version>2.0.5</testcontainers.version>
     <h2.version>2.4.240</h2.version>
-    <jnr-posix.version>3.2.1</jnr-posix.version>
+    <jnr-posix.version>3.2.2</jnr-posix.version>
     <scalatest.version>3.2.20</scalatest.version>
     <assertj.version>3.27.7</assertj.version>
 
@@ -2296,7 +2296,7 @@
         <plugin>
           <groupId>com.mycila</groupId>
           <artifactId>license-maven-plugin</artifactId>
-          <version>5.1.1</version>
+          <version>5.1.2</version>
         </plugin>
         <plugin>
           <groupId>org.codehaus.mojo</groupId>
@@ -2534,7 +2534,7 @@
           <dependency>
             <groupId>com.puppycrawl.tools</groupId>
             <artifactId>checkstyle</artifactId>
-            <version>10.26.1</version>
+            <version>14.0.0</version>
           </dependency>
         </dependencies>
         <executions>
