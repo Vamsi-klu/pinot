@@ -717,6 +717,7 @@ public class RealtimeSegmentDataManager extends SegmentDataManager {
           }
           List<GenericRow> transformedRows = result.getTransformedRows();
           for (GenericRow transformedRow : transformedRows) {
+            int docsBeforeIndex = _realtimeSegment.getNumDocsIndexed();
             try {
               canTakeMore = _realtimeSegment.index(transformedRow, metadata);
               indexedMessageCount++;
@@ -735,12 +736,28 @@ public class RealtimeSegmentDataManager extends SegmentDataManager {
                 _serverMetrics.addMeteredGlobalValue(ServerMeter.REALTIME_BYTES_CONSUMED, recordSerializedValueLength);
               }
             } catch (Exception e) {
-              _numRowsErrored++;
-              _numBytesDropped += rowSizeInBytes;
               String errorMessage =
                   "Caught exception while indexing the record at offset: " + offset + " , row: " + transformedRow;
               _segmentLogger.error(errorMessage, e);
               _realtimeTableDataManager.addSegmentError(_segmentNameStr, new SegmentErrorInfo(now(), errorMessage, e));
+              // continueOnError=false finishes a started row, then rethrows. A published repair is consumed;
+              // only an unpublished failure is a drop. An unrecoverable repair is terminal.
+              if (_realtimeSegment.getNumDocsIndexed() > docsBeforeIndex) {
+                indexedMessageCount++;
+                _lastRowMetadata = metadata;
+                _lastConsumedTimestampMs = System.currentTimeMillis();
+                realtimeRowsConsumedMeter =
+                    _serverMetrics.addMeteredTableValue(_clientId, ServerMeter.REALTIME_ROWS_CONSUMED, 1,
+                        realtimeRowsConsumedMeter);
+                _serverMetrics.addMeteredGlobalValue(ServerMeter.REALTIME_ROWS_CONSUMED, 1L);
+              } else {
+                _numRowsErrored++;
+                _numBytesDropped += rowSizeInBytes;
+              }
+              canTakeMore = _realtimeSegment.canTakeMoreRows();
+              if (!canTakeMore) {
+                throw new RuntimeException(errorMessage, e);
+              }
             }
           }
         }
@@ -1198,7 +1215,7 @@ public class RealtimeSegmentDataManager extends SegmentDataManager {
   protected SegmentBuildDescriptor buildSegmentInternal(boolean forCommit)
       throws SegmentBuildFailureException {
     if (_parallelSegmentConsumptionPolicy.isAllowedDuringBuild()) {
-      closeStreamConsumer();
+      closeStreamConsumerAndReleaseSemaphore();
     }
     // Do not allow building segment when table data manager is already shut down
     if (_realtimeTableDataManager.isShutDown()) {
@@ -1445,13 +1462,23 @@ public class RealtimeSegmentDataManager extends SegmentDataManager {
     }
   }
 
+  /// Closes the stream consumer so that no more data can be consumed into this segment. Does NOT release the consumer
+  /// semaphore, see [#closeStreamConsumerAndReleaseSemaphore()] and [#doOffload()].
   private void closeStreamConsumer() {
     if (_streamConsumerClosed.compareAndSet(false, true)) {
       closePartitionGroupConsumer();
       closePartitionMetadataProvider();
-      releaseConsumerSemaphore();
       _transformPipeline.reportStats();
     }
+  }
+
+  /// Closes the stream consumer and releases the consumer semaphore so that the next consuming segment of the
+  /// partition can start consuming in parallel with the build or download of this segment. Only called when the
+  /// [ParallelSegmentConsumptionPolicy] allows it.
+  @VisibleForTesting
+  void closeStreamConsumerAndReleaseSemaphore() {
+    closeStreamConsumer();
+    releaseConsumerSemaphore();
   }
 
   private void closePartitionGroupConsumer() {
@@ -1722,7 +1749,7 @@ public class RealtimeSegmentDataManager extends SegmentDataManager {
   protected void downloadSegmentAndReplace(SegmentZKMetadata segmentZKMetadata)
       throws Exception {
     if (_parallelSegmentConsumptionPolicy.isAllowedDuringDownload()) {
-      closeStreamConsumer();
+      closeStreamConsumerAndReleaseSemaphore();
     }
     _realtimeTableDataManager.downloadAndReplaceConsumingSegment(segmentZKMetadata);
   }
@@ -1764,9 +1791,21 @@ public class RealtimeSegmentDataManager extends SegmentDataManager {
     } catch (Exception e) {
       _segmentLogger.error("Caught exception while stopping the consumer thread", e);
     }
+    // Close the stream consumer first so that nothing can consume into the segment once it is offloaded.
     closeStreamConsumer();
-    cleanupMetrics();
-    _realtimeSegment.offload();
+    // Remove this segment's upsert/dedup metadata BEFORE releasing the consumer semaphore. For partial upsert in
+    // PROTECTED consistency mode, offload() reverts the primary keys owned by this consuming segment to their previous
+    // record locations. If the semaphore were released first, the next consuming segment of the partition could start
+    // replaying while primary keys still point to this mutable segment, and merge against the un-reverted state.
+    // When the parallel consumption policy allowed the next segment to start during build or download, the semaphore
+    // was already released there and the release below is a no-op.
+    // The semaphore is released in a finally block so that a failure in metadata removal cannot stall the partition.
+    try {
+      _realtimeSegment.offload();
+    } finally {
+      releaseConsumerSemaphore();
+      cleanupMetrics();
+    }
   }
 
   @Override
@@ -1938,7 +1977,8 @@ public class RealtimeSegmentDataManager extends SegmentDataManager {
         .setTextIndexConfig(consumingIndexLoadingConfig.getMultiColTextIndexConfig())
         .setDropRecordOnPartitionMismatch(ingestionConfig != null
             && ingestionConfig.getStreamIngestionConfig() != null
-            && ingestionConfig.getStreamIngestionConfig().isDropRecordOnPartitionMismatch());
+            && ingestionConfig.getStreamIngestionConfig().isDropRecordOnPartitionMismatch())
+        .setContinueOnError(ingestionConfig != null && ingestionConfig.isContinueOnError());
 
     // Create message decoder
     Set<String> fieldsToRead = IngestionUtils.getFieldsForRecordExtractor(_tableConfig, _schema);
