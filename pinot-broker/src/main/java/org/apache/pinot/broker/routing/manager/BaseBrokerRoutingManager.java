@@ -20,6 +20,7 @@ package org.apache.pinot.broker.routing.manager;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -44,7 +45,6 @@ import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.commons.lang3.tuple.Pair;
 import org.apache.helix.AccessOption;
 import org.apache.helix.BaseDataAccessor;
 import org.apache.helix.HelixConstants.ChangeType;
@@ -416,11 +416,13 @@ public abstract class BaseBrokerRoutingManager implements RoutingManager, Cluste
       String instanceId = instanceConfigZNRecord.getId();
       try {
         if (isEnabledServer(instanceConfigZNRecord)) {
-          enabledServers.add(instanceId);
-
           // Always refresh the server instance with the latest instance config in case it changes
           InstanceConfig instanceConfig = new InstanceConfig(instanceConfigZNRecord);
           ServerInstance serverInstance = new ServerInstance(instanceConfig);
+          // Key the maps by the interned instance id so that lookups with the Jackson-interned instance ids from IS/EV
+          // hit the identity fast path
+          instanceId = serverInstance.getInstanceId();
+          enabledServers.add(instanceId);
           if (_enabledServerInstanceMap.put(instanceId, serverInstance) == null) {
             newEnabledServers.add(instanceId);
 
@@ -814,6 +816,8 @@ public abstract class BaseBrokerRoutingManager implements RoutingManager, Cluste
 
       AdaptiveServerSelector adaptiveServerSelector =
           AdaptiveServerSelectorFactory.getAdaptiveServerSelector(_serverRoutingStatsManager, _pinotConfig);
+      // For StrictReplicaGroupInstanceSelector tables, pool-level adaptive routing is used,
+      // preserving the same-replica-group guarantee while benefiting from adaptive server selection.
       InstanceSelector instanceSelector =
           InstanceSelectorFactory.getInstanceSelector(tableConfig, _propertyStore, _brokerMetrics,
               adaptiveServerSelector, _pinotConfig, _routableServerInstanceMap.keySet(), _enabledServerInstanceMap,
@@ -1191,30 +1195,31 @@ public abstract class BaseBrokerRoutingManager implements RoutingManager, Cluste
   private Map<ServerInstance, SegmentsToQuery> getServerInstanceToSegmentsMap(String tableNameWithType,
       InstanceSelector.SelectionResult selectionResult) {
     Map<ServerInstance, SegmentsToQuery> merged = new HashMap<>();
-    for (Map.Entry<String, String> entry : selectionResult.getSegmentToInstanceMap().entrySet()) {
-      ServerInstance serverInstance = _enabledServerInstanceMap.get(entry.getValue());
+    // Flat selection maps can traverse their arrays directly without allocating an entry object per segment.
+    selectionResult.getSegmentToInstanceMap().forEach((segment, instanceId) -> {
+      ServerInstance serverInstance = _enabledServerInstanceMap.get(instanceId);
       if (serverInstance != null) {
         SegmentsToQuery segmentsToQuery =
             merged.computeIfAbsent(serverInstance, k -> new SegmentsToQuery(new ArrayList<>(), new ArrayList<>()));
-        segmentsToQuery.getSegments().add(entry.getKey());
+        segmentsToQuery.getSegments().add(segment);
       } else {
         // Should not happen in normal case unless encountered unexpected exception when updating routing entries
         _brokerMetrics.addMeteredTableValue(tableNameWithType, BrokerMeter.SERVER_MISSING_FOR_ROUTING, 1L);
       }
-    }
-    for (Map.Entry<String, String> entry : selectionResult.getOptionalSegmentToInstanceMap().entrySet()) {
-      ServerInstance serverInstance = _enabledServerInstanceMap.get(entry.getValue());
+    });
+    selectionResult.getOptionalSegmentToInstanceMap().forEach((segment, instanceId) -> {
+      ServerInstance serverInstance = _enabledServerInstanceMap.get(instanceId);
       if (serverInstance != null) {
         SegmentsToQuery segmentsToQuery = merged.get(serverInstance);
         // Skip servers that don't have non-optional segments, so that servers always get some non-optional segments
         // to process, to be backward compatible.
         // TODO: allow servers only with optional segments
         if (segmentsToQuery != null) {
-          segmentsToQuery.getOptionalSegments().add(entry.getKey());
+          segmentsToQuery.getOptionalSegments().add(segment);
         }
       }
       // TODO: Report missing server metrics when we allow servers only with optional segments.
-    }
+    });
     return merged;
   }
 
@@ -1233,6 +1238,16 @@ public abstract class BaseBrokerRoutingManager implements RoutingManager, Cluste
       return null;
     }
     return routingEntry.getSegments(brokerRequest, samplerName);
+  }
+
+  @Nullable
+  @Override
+  public Set<String> getPrunedSegments(BrokerRequest brokerRequest) {
+    RoutingEntry routingEntry = _routingEntryMap.get(brokerRequest.getQuerySource().getTableName());
+    if (routingEntry == null) {
+      return null;
+    }
+    return routingEntry.getPrunedSegments(brokerRequest, extractSamplerName(brokerRequest));
   }
 
   private static String normalizeSamplerName(String samplerName) {
@@ -1255,6 +1270,11 @@ public abstract class BaseBrokerRoutingManager implements RoutingManager, Cluste
   @Override
   public Map<String, ServerInstance> getRoutableServerInstanceMap() {
     return _routableServerInstanceMap;
+  }
+
+  @Override
+  public Set<String> getRoutableTables() {
+    return Set.copyOf(_routingEntryMap.keySet());
   }
 
   /// Must be called under `_globalLock.writeLock()` when rebuilding `_routableServerInstanceMap` from a freshly
@@ -1510,40 +1530,82 @@ public abstract class BaseBrokerRoutingManager implements RoutingManager, Cluste
       }
     }
 
+    /// Runs selection and then the pruner chain, which is the one place that decides what a query sees. Every caller
+    /// goes through here on purpose: the routing table, the plain segment list and the planner's emptiness proof must
+    /// all be judged by the same selector and the same pruners. A second copy of this sequence that drifted would let
+    /// the planner prove a partition empty that a real query would still have scanned, and that loses rows with no
+    /// error anywhere.
+    private SelectedSegments selectThenPrune(BrokerRequest brokerRequest, @Nullable SamplerInfo samplerInfo) {
+      SegmentSelector segmentSelector = samplerInfo != null ? samplerInfo._segmentSelector : _segmentSelector;
+      Set<String> selectedSegments = segmentSelector.select(brokerRequest);
+      Set<String> survivingSegments = selectedSegments;
+      if (!selectedSegments.isEmpty()) {
+        for (SegmentPruner segmentPruner : _segmentPruners) {
+          survivingSegments = segmentPruner.prune(brokerRequest, survivingSegments);
+        }
+      }
+      return new SelectedSegments(selectedSegments, survivingSegments);
+    }
+
     InstanceSelector.SelectionResult calculateRouting(BrokerRequest brokerRequest, long requestId,
         @Nullable String samplerName) {
       SamplerInfo samplerInfo = getSamplerInfo(samplerName);
-      SegmentSelector segmentSelector = samplerInfo != null ? samplerInfo._segmentSelector : _segmentSelector;
       InstanceSelector instanceSelector = samplerInfo != null ? samplerInfo._instanceSelector : _instanceSelector;
-      Set<String> selectedSegments = segmentSelector.select(brokerRequest);
-      int numTotalSelectedSegments = selectedSegments.size();
-      if (!selectedSegments.isEmpty()) {
-        for (SegmentPruner segmentPruner : _segmentPruners) {
-          selectedSegments = segmentPruner.prune(brokerRequest, selectedSegments);
-        }
-      }
-      int numPrunedSegments = numTotalSelectedSegments - selectedSegments.size();
-      if (!selectedSegments.isEmpty()) {
+      SelectedSegments selectedSegments = selectThenPrune(brokerRequest, samplerInfo);
+      Set<String> survivingSegments = selectedSegments._surviving;
+      int numPrunedSegments = selectedSegments.getNumPruned();
+      if (!survivingSegments.isEmpty()) {
         InstanceSelector.SelectionResult selectionResult =
-            instanceSelector.select(brokerRequest, new ArrayList<>(selectedSegments), requestId);
+            instanceSelector.select(brokerRequest, new ArrayList<>(survivingSegments), requestId);
         selectionResult.setNumPrunedSegments(numPrunedSegments);
         return selectionResult;
       } else {
-        return new InstanceSelector.SelectionResult(Pair.of(Map.of(), Map.of()),
-            List.of(), numPrunedSegments);
+        return InstanceSelector.SelectionResult.empty(numPrunedSegments);
       }
     }
 
     List<String> getSegments(BrokerRequest brokerRequest, @Nullable String samplerName) {
-      SamplerInfo samplerInfo = getSamplerInfo(samplerName);
-      SegmentSelector segmentSelector = samplerInfo != null ? samplerInfo._segmentSelector : _segmentSelector;
-      Set<String> selectedSegments = segmentSelector.select(brokerRequest);
-      if (!selectedSegments.isEmpty()) {
-        for (SegmentPruner segmentPruner : _segmentPruners) {
-          selectedSegments = segmentPruner.prune(brokerRequest, selectedSegments);
+      return new ArrayList<>(selectThenPrune(brokerRequest, getSamplerInfo(samplerName))._surviving);
+    }
+
+    /// See [RoutingManager#getPrunedSegments]. The sampler is honoured for the same reason the query path honours it:
+    /// a narrower selection only ever shrinks what this can prove, never widens it.
+    ///
+    /// The pruners return a new set rather than editing the one they are handed, so taking the difference costs
+    /// nothing unless something was actually pruned. If one ever did edit in place the two sets would be the same
+    /// object, the difference would come out empty, and this would fall back to proving nothing -- the safe direction.
+    Set<String> getPrunedSegments(BrokerRequest brokerRequest, @Nullable String samplerName) {
+      SelectedSegments selectedSegments = selectThenPrune(brokerRequest, getSamplerInfo(samplerName));
+      int numPruned = selectedSegments.getNumPruned();
+      if (numPruned == 0) {
+        return Set.of();
+      }
+      // Built up rather than copied down: the count is already known and is usually a small fraction of the table's
+      // segments, so copying every selected segment only to remove most of them again would size the allocation to
+      // the table instead of to the answer.
+      Set<String> prunedSegments = Sets.newHashSetWithExpectedSize(numPruned);
+      for (String segment : selectedSegments._selected) {
+        if (!selectedSegments._surviving.contains(segment)) {
+          prunedSegments.add(segment);
         }
       }
-      return new ArrayList<>(selectedSegments);
+      return prunedSegments;
+    }
+  }
+
+  /// What one run of [RoutingEntry#selectThenPrune] decided: the segments selection offered, and the ones the pruners
+  /// left. Both are needed because the difference between them is the only sound proof that a segment cannot match.
+  private static class SelectedSegments {
+    final Set<String> _selected;
+    final Set<String> _surviving;
+
+    SelectedSegments(Set<String> selected, Set<String> surviving) {
+      _selected = selected;
+      _surviving = surviving;
+    }
+
+    int getNumPruned() {
+      return _selected.size() - _surviving.size();
     }
   }
 }

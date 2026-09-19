@@ -18,10 +18,12 @@
  */
 package org.apache.pinot.broker.routing.manager;
 
+import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap;
 import java.lang.reflect.Constructor;
-import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Consumer;
 import org.apache.helix.AccessOption;
 import org.apache.helix.BaseDataAccessor;
@@ -34,6 +36,7 @@ import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.store.zk.ZkHelixPropertyStore;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.helix.zookeeper.datamodel.serializer.ZNRecordSerializer;
 import org.apache.pinot.broker.routing.instanceselector.InstanceSelector;
 import org.apache.pinot.broker.routing.instanceselector.TableReplicaHealth;
 import org.apache.pinot.broker.routing.segmentmetadata.SegmentZkMetadataFetcher;
@@ -44,8 +47,13 @@ import org.apache.pinot.broker.routing.segmentselector.SegmentSelector;
 import org.apache.pinot.broker.routing.tablesampler.TableSampler;
 import org.apache.pinot.broker.routing.timeboundary.TimeBoundaryManager;
 import org.apache.pinot.common.metrics.BrokerGauge;
+import org.apache.pinot.common.metrics.BrokerMeter;
 import org.apache.pinot.common.metrics.BrokerMetrics;
+import org.apache.pinot.common.request.BrokerRequest;
+import org.apache.pinot.common.request.QuerySource;
 import org.apache.pinot.common.utils.config.TableConfigSerDeUtils;
+import org.apache.pinot.core.routing.RoutingTable;
+import org.apache.pinot.core.routing.SegmentsToQuery;
 import org.apache.pinot.core.routing.TablePartitionInfo;
 import org.apache.pinot.core.routing.TablePartitionReplicatedServersInfo;
 import org.apache.pinot.core.routing.timeboundary.TimeBoundaryInfo;
@@ -54,6 +62,7 @@ import org.apache.pinot.core.transport.server.routing.stats.ServerRoutingStatsMa
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.env.PinotConfiguration;
+import org.apache.pinot.spi.utils.CommonConstants.Helix;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.apache.zookeeper.data.Stat;
@@ -68,16 +77,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.clearInvocations;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertSame;
-import static org.testng.Assert.assertTrue;
+import static org.mockito.Mockito.*;
+import static org.testng.Assert.*;
 
 
 public class BrokerRoutingManagerTest {
@@ -152,6 +153,100 @@ public class BrokerRoutingManagerTest {
   public void tearDown()
       throws Exception {
     _mocks.close();
+  }
+
+  @Test
+  public void testInstanceConfigIdsInternedAcrossRefreshesAndRouting()
+      throws Exception {
+    ZNRecordSerializer serializer = new ZNRecordSerializer();
+    ZNRecord assignments = new ZNRecord(TEST_TABLE);
+    assignments.setMapField("required", Map.of(SERVER_INSTANCE_ID, "ONLINE"));
+    assignments.setMapField("optional", Map.of(SERVER_INSTANCE_ID, "ONLINE"));
+    byte[] serializedAssignments = serializer.serialize(assignments);
+    InstanceSelector instanceSelector = mock(InstanceSelector.class);
+    putRoutingEntry(TEST_TABLE,
+        createRoutingEntry(TEST_TABLE, selectorOf("required", "optional"), List.of(), instanceSelector));
+
+    for (int grpcPort : List.of(9000, 9001)) {
+      ZNRecord decodedAssignments = (ZNRecord) serializer.deserialize(serializedAssignments);
+      String requiredInstanceId = decodedAssignments.getMapField("required").keySet().iterator().next();
+      String optionalInstanceId = decodedAssignments.getMapField("optional").keySet().iterator().next();
+      // Exercise IDs from real assignment-map decoding, including the parser's JVM interning behavior.
+      assertSame(requiredInstanceId, SERVER_INSTANCE_ID);
+      assertSame(optionalInstanceId, requiredInstanceId);
+      when(instanceSelector.select(any(), any(), anyLong())).thenReturn(new InstanceSelector.SelectionResult(
+          new InstanceSelector.InstanceMapping(Map.of("required", requiredInstanceId),
+              Map.of("optional", optionalInstanceId)), List.of(), 0));
+
+      ZNRecord config = createEnabledServerZNRecord(SERVER_INSTANCE_ID);
+      config.setIntField(Helix.Instance.GRPC_PORT_KEY, grpcPort);
+      ZNRecord decodedConfig = (ZNRecord) serializer.deserialize(serializer.serialize(config));
+      // Config IDs are JSON values; unlike assignment-map keys, they are not interned by the parser.
+      assertEquals(decodedConfig.getId(), SERVER_INSTANCE_ID);
+      assertNotSame(decodedConfig.getId(), requiredInstanceId);
+      when(_zkDataAccessor.getChildren(eq(INSTANCE_CONFIGS_PATH), any(), eq(AccessOption.PERSISTENT), anyInt(),
+          anyInt())).thenReturn(List.of(decodedConfig));
+
+      _routingManager.processClusterChange(ChangeType.INSTANCE_CONFIG);
+
+      Map<String, ServerInstance> enabledServers = _routingManager.getEnabledServerInstanceMap();
+      assertEquals(enabledServers.size(), 1);
+      assertSame(enabledServers.keySet().iterator().next(), requiredInstanceId);
+      ServerInstance server = enabledServers.get(requiredInstanceId);
+      assertSame(server.getInstanceId(), requiredInstanceId);
+      assertEquals(server.getHostname(), SERVER_HOST);
+      assertEquals(server.getPort(), SERVER_PORT);
+      // An equal ID on a later config refresh must still replace the server's configuration.
+      assertEquals(server.getGrpcPort(), grpcPort);
+      assertSame(_routingManager.getRoutableServerInstanceMap().get(requiredInstanceId), server);
+
+      RoutingTable routingTable = _routingManager.getRoutingTable(brokerRequest(TEST_TABLE), 0);
+      Map<ServerInstance, SegmentsToQuery> serverSegments = routingTable.getServerInstanceToSegmentsMap();
+      assertEquals(serverSegments.size(), 1);
+      assertSame(serverSegments.keySet().iterator().next(), server);
+      assertEquals(serverSegments.get(server).getSegments(), List.of("required"));
+      assertEquals(serverSegments.get(server).getOptionalSegments(), List.of("optional"));
+      assertTrue(routingTable.getUnavailableSegments().isEmpty());
+    }
+  }
+
+  @Test
+  public void testGroupingPreservesOptionalServerAndMissingServerBehavior()
+      throws Exception {
+    String optionalOnlyInstanceId = "Server_optional_8000";
+    ServerInstance requiredServer =
+        new ServerInstance(new InstanceConfig(createEnabledServerZNRecord(SERVER_INSTANCE_ID)));
+    ServerInstance optionalOnlyServer =
+        new ServerInstance(new InstanceConfig(createEnabledServerZNRecord(optionalOnlyInstanceId)));
+    _routingManager.getEnabledServerInstanceMap().put(SERVER_INSTANCE_ID, requiredServer);
+    _routingManager.getEnabledServerInstanceMap().put(optionalOnlyInstanceId, optionalOnlyServer);
+    Map<String, String> required = new Object2ObjectOpenHashMap<>(Map.of(
+        "required0", SERVER_INSTANCE_ID, "required1", SERVER_INSTANCE_ID,
+        "missingRequired0", "Server_missing_8000", "missingRequired1", "Server_missing_8000"));
+    Map<String, String> optional = Map.of("optional", SERVER_INSTANCE_ID,
+        "optionalOnly", optionalOnlyInstanceId, "missingOptional", "Server_missing_optional_8000");
+    InstanceSelector instanceSelector = mock(InstanceSelector.class);
+    when(instanceSelector.select(any(), any(), anyLong())).thenReturn(new InstanceSelector.SelectionResult(
+        new InstanceSelector.InstanceMapping(required, optional), List.of(), 0));
+    putRoutingEntry(TEST_TABLE, createRoutingEntry(TEST_TABLE,
+        selectorOf("required0", "required1", "missingRequired0", "missingRequired1", "optional", "optionalOnly",
+            "missingOptional"), List.of(), instanceSelector));
+    clearInvocations(_brokerMetrics);
+
+    RoutingTable routingTable = _routingManager.getRoutingTable(brokerRequest(TEST_TABLE), 0);
+
+    Map<ServerInstance, SegmentsToQuery> grouped = routingTable.getServerInstanceToSegmentsMap();
+    assertEquals(grouped.keySet(), Set.of(requiredServer));
+    assertEquals(new HashSet<>(grouped.get(requiredServer).getSegments()), Set.of("required0", "required1"));
+    assertEquals(grouped.get(requiredServer).getSegments().size(), 2);
+    assertEquals(grouped.get(requiredServer).getOptionalSegments(), List.of("optional"));
+    assertTrue(routingTable.getUnavailableSegments().isEmpty());
+    // Missing required segments are metered; missing optional segments and optional-only servers are skipped.
+    ArgumentCaptor<Long> increments = ArgumentCaptor.forClass(Long.class);
+    verify(_brokerMetrics, atLeastOnce()).addMeteredTableValue(eq(TEST_TABLE),
+        eq(BrokerMeter.SERVER_MISSING_FOR_ROUTING), increments.capture());
+    assertEquals(increments.getAllValues().stream().mapToLong(Long::longValue).sum(), 2L);
+    verifyNoMoreInteractions(_brokerMetrics);
   }
 
   @Test
@@ -258,16 +353,169 @@ public class BrokerRoutingManagerTest {
     assertSame(_routingManager.getTablePartitionReplicatedServersInfo(TEST_TABLE), expectedReplicatedServersInfo);
   }
 
+  @Test
+  public void testGetPrunedSegmentsIsExactlySelectedMinusSurvivors()
+      throws Exception {
+    SegmentSelector segmentSelector = selectorOf("seg1", "seg2", "seg3", "seg4");
+    putRoutingEntry(TEST_TABLE,
+        createRoutingEntry(TEST_TABLE, segmentSelector, List.of(prunerDropping("seg1", "seg3")),
+            mock(InstanceSelector.class)));
+
+    assertEquals(_routingManager.getPrunedSegments(brokerRequest(TEST_TABLE)), Set.of("seg1", "seg3"));
+  }
+
+  @Test
+  public void testGetPrunedSegmentsChainsEveryPruner()
+      throws Exception {
+    SegmentPruner firstPruner = prunerDropping("seg1");
+    SegmentPruner secondPruner = prunerDropping("seg3");
+    putRoutingEntry(TEST_TABLE,
+        createRoutingEntry(TEST_TABLE, selectorOf("seg1", "seg2", "seg3"), List.of(firstPruner, secondPruner),
+            mock(InstanceSelector.class)));
+
+    assertEquals(_routingManager.getPrunedSegments(brokerRequest(TEST_TABLE)), Set.of("seg1", "seg3"));
+
+    // The second pruner judges what the first left, so consulting only the last one would lose "seg1".
+    ArgumentCaptor<Set<String>> captor = ArgumentCaptor.captor();
+    verify(secondPruner).prune(any(), captor.capture());
+    assertEquals(captor.getValue(), Set.of("seg2", "seg3"));
+  }
+
+  /// Nothing pruned must read as "proved nothing", not as "proved every selected segment empty" -- the latter would
+  /// let a caller treat a table that fully matches the filter as a table with no matching rows.
+  @Test
+  public void testGetPrunedSegmentsIsEmptyWhenNothingWasPruned()
+      throws Exception {
+    putRoutingEntry(TEST_TABLE,
+        createRoutingEntry(TEST_TABLE, selectorOf("seg1", "seg2"), List.of(prunerDropping()),
+            mock(InstanceSelector.class)));
+
+    assertEquals(_routingManager.getPrunedSegments(brokerRequest(TEST_TABLE)), Set.of());
+  }
+
+  @Test
+  public void testGetPrunedSegmentsIsEmptyWhenSelectionIsEmpty()
+      throws Exception {
+    SegmentPruner pruner = prunerDropping("seg1");
+    putRoutingEntry(TEST_TABLE,
+        createRoutingEntry(TEST_TABLE, selectorOf(), List.of(pruner), mock(InstanceSelector.class)));
+
+    assertEquals(_routingManager.getPrunedSegments(brokerRequest(TEST_TABLE)), Set.of());
+    // An empty selection is answered without asking anyone, so the empty result cannot have come from a pruner.
+    verify(pruner, never()).prune(any(), any());
+  }
+
+  /// A table this broker has no routing for is `null`, not an empty set: it eliminated nothing because it would have
+  /// routed nothing, which is a different claim from "the pruners ran and proved nothing".
+  @Test
+  public void testGetPrunedSegmentsIsNullForUnknownTable() {
+    assertNull(_routingManager.getPrunedSegments(brokerRequest("noSuchTable_OFFLINE")));
+  }
+
+  /// The whole point of the API: only presence in the result is a proof. A segment the selector never offered is
+  /// absent from the survivors for a reason that has nothing to do with the filter -- here the selector withheld
+  /// "seg3" -- and reporting it would let a caller skip a segment that may well hold matching rows.
+  @Test
+  public void testGetPrunedSegmentsDoesNotReportASegmentTheSelectorNeverOffered()
+      throws Exception {
+    putRoutingEntry(TEST_TABLE,
+        createRoutingEntry(TEST_TABLE, selectorOf("seg1", "seg2"), List.of(prunerDropping("seg1", "seg3")),
+            mock(InstanceSelector.class)));
+
+    Set<String> prunedSegments = _routingManager.getPrunedSegments(brokerRequest(TEST_TABLE));
+
+    assertEquals(prunedSegments, Set.of("seg1"));
+    assertFalse(prunedSegments.contains("seg3"));
+  }
+
+  /// Instance selection is what makes routing depend on the request id and on which replicas are up; keeping it out
+  /// is what makes this deterministic enough to plan on.
+  @Test
+  public void testGetPrunedSegmentsNeverConsultsInstanceSelection()
+      throws Exception {
+    InstanceSelector instanceSelector = mock(InstanceSelector.class);
+    putRoutingEntry(TEST_TABLE,
+        createRoutingEntry(TEST_TABLE, selectorOf("seg1", "seg2"), List.of(prunerDropping("seg1")), instanceSelector));
+
+    assertEquals(_routingManager.getPrunedSegments(brokerRequest(TEST_TABLE)), Set.of("seg1"));
+    verifyNoInteractions(instanceSelector);
+  }
+
+  /// A pruner that edits the set it was handed leaves nothing to take a difference against. That has to degrade to
+  /// "proved nothing" rather than to a wrong proof.
+  @Test
+  public void testGetPrunedSegmentsIsEmptyWhenAPrunerEditsInPlace()
+      throws Exception {
+    SegmentPruner pruner = mock(SegmentPruner.class);
+    when(pruner.prune(any(), any())).thenAnswer(invocation -> {
+      Set<String> segments = invocation.getArgument(1);
+      segments.remove("seg1");
+      return segments;
+    });
+    SegmentSelector segmentSelector = mock(SegmentSelector.class);
+    when(segmentSelector.select(any())).thenReturn(new HashSet<>(Set.of("seg1", "seg2")));
+    putRoutingEntry(TEST_TABLE,
+        createRoutingEntry(TEST_TABLE, segmentSelector, List.of(pruner), mock(InstanceSelector.class)));
+
+    assertEquals(_routingManager.getPrunedSegments(brokerRequest(TEST_TABLE)), Set.of());
+  }
+
+  private static BrokerRequest brokerRequest(String tableNameWithType) {
+    QuerySource querySource = new QuerySource();
+    querySource.setTableName(tableNameWithType);
+    BrokerRequest brokerRequest = new BrokerRequest();
+    brokerRequest.setQuerySource(querySource);
+    return brokerRequest;
+  }
+
+  private static SegmentSelector selectorOf(String... segments) {
+    SegmentSelector segmentSelector = mock(SegmentSelector.class);
+    when(segmentSelector.select(any())).thenReturn(Set.of(segments));
+    return segmentSelector;
+  }
+
+  /// Mirrors [org.apache.pinot.broker.routing.segmentpruner.EmptySegmentPruner]: a fresh set when it prunes
+  /// something, the very set it was handed when it does not.
+  private static SegmentPruner prunerDropping(String... segments) {
+    Set<String> droppedSegments = Set.of(segments);
+    SegmentPruner segmentPruner = mock(SegmentPruner.class);
+    when(segmentPruner.prune(any(), any())).thenAnswer(invocation -> {
+      Set<String> candidateSegments = invocation.getArgument(1);
+      if (droppedSegments.stream().noneMatch(candidateSegments::contains)) {
+        return candidateSegments;
+      }
+      Set<String> survivingSegments = new HashSet<>(candidateSegments);
+      survivingSegments.removeAll(droppedSegments);
+      return survivingSegments;
+    });
+    return segmentPruner;
+  }
+
   private static Object createRoutingEntry(String tableNameWithType, TimeBoundaryManager timeBoundaryManager,
       SegmentPartitionMetadataManager partitionMetadataManager, Map<String, ?> samplerInfos)
       throws Exception {
-    return createRoutingEntry(tableNameWithType, timeBoundaryManager, partitionMetadataManager, samplerInfos,
-        mock(InstanceSelector.class), false);
+    return createRoutingEntry(tableNameWithType, mock(SegmentSelector.class), List.of(),
+        mock(InstanceSelector.class), timeBoundaryManager, partitionMetadataManager, samplerInfos, false);
   }
 
   private static Object createRoutingEntry(String tableNameWithType, TimeBoundaryManager timeBoundaryManager,
       SegmentPartitionMetadataManager partitionMetadataManager, Map<String, ?> samplerInfos,
       InstanceSelector instanceSelector, boolean disabled)
+      throws Exception {
+    return createRoutingEntry(tableNameWithType, mock(SegmentSelector.class), List.of(), instanceSelector,
+        timeBoundaryManager, partitionMetadataManager, samplerInfos, disabled);
+  }
+
+  private static Object createRoutingEntry(String tableNameWithType, SegmentSelector segmentSelector,
+      List<SegmentPruner> segmentPruners, InstanceSelector instanceSelector)
+      throws Exception {
+    return createRoutingEntry(tableNameWithType, segmentSelector, segmentPruners, instanceSelector,
+        mock(TimeBoundaryManager.class), mock(SegmentPartitionMetadataManager.class), Map.of(), false);
+  }
+
+  private static Object createRoutingEntry(String tableNameWithType, SegmentSelector segmentSelector,
+      List<SegmentPruner> segmentPruners, InstanceSelector instanceSelector, TimeBoundaryManager timeBoundaryManager,
+      SegmentPartitionMetadataManager partitionMetadataManager, Map<String, ?> samplerInfos, boolean disabled)
       throws Exception {
     Class<?> routingEntryClass = Class.forName(BaseBrokerRoutingManager.class.getName() + "$RoutingEntry");
     Constructor<?> constructor = routingEntryClass.getDeclaredConstructor(String.class, String.class, String.class,
@@ -276,8 +524,8 @@ public class BrokerRoutingManagerTest {
         Map.class, boolean.class);
     constructor.setAccessible(true);
     return constructor.newInstance(tableNameWithType, "/IDEALSTATES/" + tableNameWithType,
-        "/EXTERNALVIEW/" + tableNameWithType, mock(SegmentPreSelector.class), mock(SegmentSelector.class),
-        Collections.<SegmentPruner>emptyList(), instanceSelector, 1, 1,
+        "/EXTERNALVIEW/" + tableNameWithType, mock(SegmentPreSelector.class), segmentSelector, segmentPruners,
+        instanceSelector, 1, 1,
         mock(SegmentZkMetadataFetcher.class), timeBoundaryManager, partitionMetadataManager, null, samplerInfos,
         disabled);
   }

@@ -112,8 +112,11 @@ public class ImmutableSegmentLoader {
     return load(indexDir, indexLoadingConfig, needPreprocess, null, null);
   }
 
-  /// Loads the segment with specified schema and IndexLoadingConfig, and allows to control whether to
-  /// modify the segment like to convert segment format, add or remove indices.
+  /// Loads the segment with specified schema and IndexLoadingConfig.
+  ///
+  /// `needPreprocess` is the caller's opt-in signal: `false` skips preprocess unconditionally; `true` asks the
+  /// loader to decide by calling [#needPreprocess(SegmentDirectory, IndexLoadingConfig)]. Preprocess is only
+  /// invoked when both the caller opts in and the loader determines work is actually pending.
   public static ImmutableSegment load(File indexDir, IndexLoadingConfig indexLoadingConfig, boolean needPreprocess,
       @Nullable SegmentOperationsThrottlerSet segmentOperationsThrottlerSet, @Nullable SegmentZKMetadata zkMetadata)
       throws Exception {
@@ -123,9 +126,6 @@ public class ImmutableSegmentLoader {
     SegmentMetadataImpl segmentMetadata = new SegmentMetadataImpl(indexDir);
     if (segmentMetadata.getTotalDocs() == 0) {
       return new EmptyIndexSegment(segmentMetadata);
-    }
-    if (needPreprocess) {
-      preprocess(indexDir, indexLoadingConfig, segmentOperationsThrottlerSet, zkMetadata);
     }
     String segmentName = segmentMetadata.getName();
     SegmentDirectoryLoaderContext segmentLoaderContext = new SegmentDirectoryLoaderContext.Builder()
@@ -140,6 +140,17 @@ public class ImmutableSegmentLoader {
         .setInstanceTierConfigs(indexLoadingConfig.getInstanceTierConfigs())
         .setSegmentCustomConfigs(zkMetadata != null ? zkMetadata.getCustomMap() : Map.of())
         .build();
+    if (needPreprocess) {
+      // Probe with the default (non-tier-aware) loader so this check never physically moves the segment across
+      // tiers; the tier-aware loader is only used for the final open below.
+      try (SegmentDirectory checkDirectory =
+          SegmentDirectoryLoaderRegistry.getDefaultSegmentDirectoryLoader().load(indexDir.toURI(),
+              segmentLoaderContext)) {
+        if (needPreprocess(checkDirectory, indexLoadingConfig)) {
+          preprocess(indexDir, indexLoadingConfig, segmentOperationsThrottlerSet, zkMetadata);
+        }
+      }
+    }
     SegmentDirectoryLoader segmentLoader =
         SegmentDirectoryLoaderRegistry.getSegmentDirectoryLoader(indexLoadingConfig.getSegmentDirectoryLoader());
     SegmentDirectory segmentDirectory = segmentLoader.load(indexDir.toURI(), segmentLoaderContext);
@@ -272,6 +283,15 @@ public class ImmutableSegmentLoader {
   /// segment format, adding new indices or updating default columns.
   public static boolean needPreprocess(SegmentDirectory segmentDirectory, IndexLoadingConfig indexLoadingConfig)
       throws Exception {
+    return needPreprocess(segmentDirectory, indexLoadingConfig, true);
+  }
+
+  /// Same as [#needPreprocess(SegmentDirectory, IndexLoadingConfig)], with an option to ignore transform-function
+  /// updates. RefreshSegment includes them and omits the affected output fields during record replay so they are
+  /// recomputed by the ingestion pipeline.
+  public static boolean needPreprocess(SegmentDirectory segmentDirectory, IndexLoadingConfig indexLoadingConfig,
+      boolean includeTransformFunctionActions)
+      throws Exception {
     if (indexLoadingConfig.isSkipSegmentPreprocess()) {
       return false;
     }
@@ -282,7 +302,10 @@ public class ImmutableSegmentLoader {
     if (indexLoadingConfig.getTableConfig() == null || indexLoadingConfig.getSchema() == null) {
       return false;
     }
-    return new SegmentPreProcessor(segmentDirectory, indexLoadingConfig).needProcess();
+    SegmentPreProcessor preProcessor = SegmentPreProcessor.create(segmentDirectory, indexLoadingConfig);
+    // Keep the established no-argument dispatch for the normal loader path. Providers may return a subclass that
+    // overrides needProcess() to add plugin-specific checks; calling the newer overload directly would bypass it.
+    return includeTransformFunctionActions ? preProcessor.needProcess() : preProcessor.needProcess(false);
   }
 
   private static boolean needConvertSegmentFormat(IndexLoadingConfig indexLoadingConfig,
@@ -329,7 +352,7 @@ public class ImmutableSegmentLoader {
         .build();
     SegmentDirectory segmentDirectory =
         SegmentDirectoryLoaderRegistry.getDefaultSegmentDirectoryLoader().load(indexDir.toURI(), segmentLoaderContext);
-    try (SegmentPreProcessor preProcessor = new SegmentPreProcessor(segmentDirectory, indexLoadingConfig)) {
+    try (SegmentPreProcessor preProcessor = SegmentPreProcessor.create(segmentDirectory, indexLoadingConfig)) {
       preProcessor.process(segmentOperationsThrottlerSet);
     }
   }
