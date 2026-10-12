@@ -60,9 +60,11 @@ public enum ServerMeter implements AbstractMetrics.Meter {
   REALTIME_PARTITION_MISMATCH("mismatch", false),
   REALTIME_DEDUP_DROPPED("rows", false),
   DEDUP_PRELOAD_FAILURE("count", false),
+  UPSERT_METADATA_REVERT_FAILURES("failures", false),
   UPSERT_KEYS_IN_WRONG_SEGMENT("rows", false),
   PARTIAL_UPSERT_OUT_OF_ORDER("rows", false),
   PARTIAL_UPSERT_KEYS_NOT_REPLACED("rows", false),
+  FULL_UPSERT_KEYS_NOT_REPLACED("rows", false),
   UPSERT_OUT_OF_ORDER("rows", false),
   DELETED_KEYS_TTL_PRIMARY_KEYS_REMOVED("rows", false),
   TOTAL_KEYS_MARKED_FOR_DELETION("rows", false),
@@ -72,6 +74,7 @@ public enum ServerMeter implements AbstractMetrics.Meter {
   UPSERT_MISSED_VALID_DOC_ID_SNAPSHOT_COUNT("segments", false),
   UPSERT_MISSED_QUERYABLE_DOC_ID_SNAPSHOT_COUNT("segments", false),
   UPSERT_PRELOAD_FAILURE("count", false),
+  UPSERT_REVERT_WITH_CONSUMPTION_DURING_DOWNLOAD("segments", false),
   ROWS_WITH_ERRORS("rows", false),
   LLC_CONTROLLER_RESPONSE_NOT_SENT("messages", true),
   LLC_CONTROLLER_RESPONSE_COMMIT("messages", true),
@@ -154,6 +157,10 @@ public enum ServerMeter implements AbstractMetrics.Meter {
   DIRECT_MEMORY_OOM("directMemoryOOMCount", true),
 
   TABLE_CONFIG_AND_SCHEMA_REFRESH_FAILURES("tables", true, "Number of failures to refresh table config and schema"),
+
+  // PageCacheWarmup related metrics
+  PAGE_CACHE_WARMUP_QUERIES("pageCacheWarmupQueries", true),
+  PAGE_CACHE_WARMUP_SERVER_ERRORS("pageCacheWarmupServerErrors", true),
 
   // Multi-stage
   /// Number of times the max number of rows in the hash table has been reached.
@@ -240,7 +247,15 @@ public enum ServerMeter implements AbstractMetrics.Meter {
   DROPPED_RECORD_COUNT("rows", false),
   CORRUPTED_RECORD_COUNT("rows", false),
   OPEN_STRUCT_TYPE_COERCION_FAILURES("values", false,
-      "Number of OPEN_STRUCT values dropped because the value could not be coerced to the key's inferred type"),
+      "Number of OPEN_STRUCT values dropped because the value could not be coerced to the key's declared or "
+          + "already-established type"),
+  OPEN_STRUCT_TYPE_INFERENCE_FAILURES("values", false,
+      "Number of OPEN_STRUCT values stored as their serialized string form because the value's Java type maps to "
+          + "no Pinot DataType. A value that is instead dropped for failing coercion against a key's "
+          + "already-established non-STRING type is counted by openStructTypeCoercionFailures, not here"),
+  OPEN_STRUCT_IGNORED_KEY_DROPS("values", false,
+      "Number of OPEN_STRUCT map entries dropped at ingestion because the key is listed in the "
+          + "column's ignoredKeys config"),
   // Workload related metrics
   WORKLOAD_BUDGET_EXCEEDED("workloadBudgetExceeded", true, "Number of times workload budget exceeded"),
   WORKLOAD_QUERIES("queries", false),

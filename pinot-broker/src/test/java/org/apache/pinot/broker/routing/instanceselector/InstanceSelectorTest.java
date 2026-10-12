@@ -45,6 +45,7 @@ import org.apache.pinot.broker.routing.adaptiveserverselector.HybridSelector;
 import org.apache.pinot.common.metadata.ZKMetadataProvider;
 import org.apache.pinot.common.metadata.segment.SegmentZKMetadata;
 import org.apache.pinot.common.metrics.BrokerGauge;
+import org.apache.pinot.common.metrics.BrokerMeter;
 import org.apache.pinot.common.metrics.BrokerMetrics;
 import org.apache.pinot.common.request.BrokerRequest;
 import org.apache.pinot.common.request.PinotQuery;
@@ -63,6 +64,7 @@ import org.testng.annotations.Test;
 
 import static org.apache.pinot.spi.config.table.RoutingConfig.REPLICA_GROUP_INSTANCE_SELECTOR_TYPE;
 import static org.apache.pinot.spi.config.table.RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE;
+import static org.apache.pinot.spi.utils.CommonConstants.Broker.Request.QueryOptionKey.ORDERED_PREFERRED_POOLS;
 import static org.apache.pinot.spi.utils.CommonConstants.Helix.StateModel.SegmentStateModel.CONSUMING;
 import static org.apache.pinot.spi.utils.CommonConstants.Helix.StateModel.SegmentStateModel.ERROR;
 import static org.apache.pinot.spi.utils.CommonConstants.Helix.StateModel.SegmentStateModel.OFFLINE;
@@ -76,8 +78,10 @@ import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
 
 
@@ -250,6 +254,25 @@ public class InstanceSelectorTest {
         InstanceSelectorFactory.getInstanceSelector(tableConfig, propertyStore, brokerMetrics, new PinotConfiguration(),
             Set.of(), Map.of(), new IdealState("testTable_OFFLINE"), new ExternalView("testTable_OFFLINE"),
             Set.of()) instanceof ReplicaGroupInstanceSelector);
+  }
+
+  @Test
+  public void testFactoryDisablesAdaptiveRoutingForLegacyUpsertReplicaGroupSelector() {
+    TableConfig tableConfig = mock(TableConfig.class);
+    RoutingConfig routingConfig = mock(RoutingConfig.class);
+    HybridSelector hybridSelector = mock(HybridSelector.class);
+    when(tableConfig.getTableName()).thenReturn("legacyUpsert_REALTIME");
+    when(tableConfig.getRoutingConfig()).thenReturn(routingConfig);
+    when(tableConfig.isUpsertEnabled()).thenReturn(true);
+    when(routingConfig.getInstanceSelectorType()).thenReturn(REPLICA_GROUP_INSTANCE_SELECTOR_TYPE);
+
+    ReplicaGroupInstanceSelector instanceSelector =
+        (ReplicaGroupInstanceSelector) InstanceSelectorFactory.getInstanceSelector(tableConfig, _propertyStore,
+            _brokerMetrics, hybridSelector, new PinotConfiguration(), Set.of(), Map.of(),
+            new IdealState("legacyUpsert_REALTIME"), new ExternalView("legacyUpsert_REALTIME"), Set.of());
+
+    assertNull(instanceSelector._adaptiveServerSelector);
+    assertNull(instanceSelector._priorityPoolInstanceSelector);
   }
 
   @Test
@@ -1863,76 +1886,6 @@ public class InstanceSelectorTest {
     assertTrue(selectionResult.getUnavailableSegments().isEmpty());
   }
 
-  @Test
-  public void testReplicaGroupAdaptiveServerSelector() {
-    // Arrange
-    ZkHelixPropertyStore<ZNRecord> propertyStore = mock(ZkHelixPropertyStore.class);
-    BrokerMetrics brokerMetrics = mock(BrokerMetrics.class);
-    HybridSelector hybridSelector = mock(HybridSelector.class);
-    ReplicaGroupInstanceSelector instanceSelector = new ReplicaGroupInstanceSelector();
-
-    // Define instances and segments
-    String instance0 = "instance0";
-    String instance1 = "instance1";
-    String instance2 = "instance2";
-    String instance3 = "instance3";
-    String instance4 = "instance4";
-    String segment0 = "segment0";
-    String segment1 = "segment1";
-    String segment2 = "segment2";
-    List<String> segments = Arrays.asList(segment0, segment1, segment2);
-
-    // Define candidates for each segment
-    Map<String, List<SegmentInstanceCandidate>> instanceCandidatesMap = new HashMap<>();
-    // segment0 -> instance0, instance1
-    instanceCandidatesMap.put(segment0,
-        Arrays.asList(new SegmentInstanceCandidate(instance0, true), new SegmentInstanceCandidate(instance1, true)));
-    // segment1 -> instance2, instance3
-    instanceCandidatesMap.put(segment1,
-        Arrays.asList(new SegmentInstanceCandidate(instance2, true), new SegmentInstanceCandidate(instance3, true)));
-    // segment2 -> instance3, instance4 // instance4 is not in the hybrid selector's server ranking
-    instanceCandidatesMap.put(segment2,
-        Arrays.asList(new SegmentInstanceCandidate(instance4, true), new SegmentInstanceCandidate(instance3, true)));
-
-    IdealState idealState = createIdealState(
-        Map.of(segment0, List.of(Pair.of(instance0, ONLINE), Pair.of(instance1, ONLINE)), segment1,
-            List.of(Pair.of(instance2, ONLINE), Pair.of(instance3, ONLINE)), segment2,
-            List.of(Pair.of(instance3, ONLINE), Pair.of(instance4, ONLINE))));
-
-    ExternalView externalView = createExternalView(
-        Map.of(segment0, List.of(Pair.of(instance0, ONLINE), Pair.of(instance1, ONLINE)), segment1,
-            List.of(Pair.of(instance2, ONLINE), Pair.of(instance3, ONLINE)), segment2,
-            List.of(Pair.of(instance3, ONLINE), Pair.of(instance4, ONLINE))));
-
-    instanceSelector.init(_tableConfig, propertyStore, brokerMetrics, hybridSelector, Clock.systemUTC(),
-        INSTANCE_SELECTOR_CONFIG, Set.of(instance0, instance1, instance2, instance3, instance4), EMPTY_SERVER_MAP,
-        idealState, externalView, new HashSet<>(segments));
-
-    // Define the segment states
-    SegmentStates segmentStates = new SegmentStates(instanceCandidatesMap, new HashSet<>(segments), null);
-
-    // Define server rankings
-    List<Pair<String, Double>> serverRanks = Arrays.asList(
-        new ImmutablePair<>(instance3, 1.0),
-        new ImmutablePair<>(instance2, 2.0),
-        new ImmutablePair<>(instance1, 3.0),
-        new ImmutablePair<>(instance0, 4.0)
-    );
-    when(hybridSelector.fetchServerRankingsWithScores(any())).thenReturn(serverRanks);
-
-    // Act
-    Pair<Map<String, String>, Map<String, String>> selectedResult =
-        instanceSelector.select(segments, 0, segmentStates, null);
-
-    // Assert
-    Map<String, String> expectedSelection = new HashMap<>();
-    expectedSelection.put(segment0, instance1);
-    expectedSelection.put(segment1, instance3);
-    expectedSelection.put(segment2, instance4);
-
-    assertEquals(selectedResult.getLeft(), expectedSelection);
-  }
-
   // Replica health metrics
   //
   // The scenarios below all use the same three instances and assert on the TableReplicaHealth the
@@ -2393,5 +2346,64 @@ public class InstanceSelectorTest {
     // The selector never touches the replica health gauges itself
     verify(_brokerMetrics, never()).setValueOfTableGauge(eq(TABLE_NAME), any(BrokerGauge.class), anyLong());
     verify(_brokerMetrics, never()).removeTableGauge(eq(TABLE_NAME), any(BrokerGauge.class));
+  }
+
+  @DataProvider(name = "poolMetricsSelector")
+  public Object[] getPoolMetricsSelector() {
+    return new Object[]{BALANCED_INSTANCE_SELECTOR, REPLICA_GROUP_INSTANCE_SELECTOR_TYPE};
+  }
+
+  @Test(dataProvider = "poolMetricsSelector")
+  public void testSelectedPoolMetricsAndRequestIsolation(String selectorType) {
+    BaseInstanceSelector selector = selectorType.equals(BALANCED_INSTANCE_SELECTOR)
+        ? new BalancedInstanceSelector()
+        : new ReplicaGroupInstanceSelector();
+    selector._brokerMetrics = _brokerMetrics;
+    selector._config = INSTANCE_SELECTOR_CONFIG;
+    Map<String, List<SegmentInstanceCandidate>> candidates = new HashMap<>();
+    Map<String, String> expectedInstances = new HashMap<>();
+    List<String> segments = new ArrayList<>();
+    // Exercise the fallback pool, the primitive-map zero key, and IDs/counts outside the Integer cache.
+    for (int pool : new int[]{-1, 0, 128}) {
+      String instance = "instance" + pool;
+      for (int i = 0; i < 129; i++) {
+        String segment = "segment_" + pool + "_" + i;
+        candidates.put(segment, List.of(new SegmentInstanceCandidate(instance, true, pool, 0)));
+        expectedInstances.put(segment, instance);
+        // Routing matches segment names by value, even when query and metadata use different String objects.
+        segments.add(new String(segment));
+      }
+    }
+    candidates.put("optional", List.of(new SegmentInstanceCandidate("instance128", false, 128, 0)));
+    segments.addAll(List.of("optional", "unavailable", "pending"));
+    selector._segmentStates = new SegmentStates(candidates, Set.of("instance-1", "instance0", "instance128"),
+        Set.of("unavailable", "unrequestedUnavailable"));
+    Map<String, String> queryOptions = Map.of(ORDERED_PREFERRED_POOLS, "128|0");
+    when(_pinotQuery.getQueryOptions()).thenReturn(queryOptions);
+
+    InstanceSelector.SelectionResult first = selector.select(_brokerRequest, segments, 0L);
+
+    assertEquals(first.getSegmentToInstanceMap(), expectedInstances);
+    assertEquals(first.getOptionalSegmentToInstanceMap(), Map.of("optional", "instance128"));
+    assertEquals(first.getUnavailableSegments(), List.of("unavailable"));
+    String preferredPoolTag = BrokerMetrics.getTagForPreferredPool(queryOptions);
+    verify(_brokerMetrics).addMeteredValue(BrokerMeter.POOL_SEG_QUERIES, 129L, preferredPoolTag, "-1");
+    verify(_brokerMetrics).addMeteredValue(BrokerMeter.POOL_SEG_QUERIES, 129L, preferredPoolTag, "0");
+    // Optional segments count as selected; unavailable segments and metadata not yet present do not.
+    verify(_brokerMetrics).addMeteredValue(BrokerMeter.POOL_SEG_QUERIES, 130L, preferredPoolTag, "128");
+    verifyNoMoreInteractions(_brokerMetrics);
+
+    clearInvocations(_brokerMetrics);
+    when(_pinotQuery.getQueryOptions()).thenReturn(Map.of());
+    InstanceSelector.SelectionResult second = selector.select(_brokerRequest, List.of("segment_0_0"), 1L);
+
+    assertEquals(second.getSegmentToInstanceMap(), Map.of("segment_0_0", "instance0"));
+    assertTrue(second.getOptionalSegmentToInstanceMap().isEmpty());
+    assertTrue(second.getUnavailableSegments().isEmpty());
+    verify(_brokerMetrics).addMeteredValue(BrokerMeter.POOL_SEG_QUERIES, 1L,
+        BrokerMetrics.getTagForPreferredPool(Map.of()), "0");
+    verifyNoMoreInteractions(_brokerMetrics);
+    assertEquals(first.getSegmentToInstanceMap(), expectedInstances);
+    assertEquals(first.getOptionalSegmentToInstanceMap(), Map.of("optional", "instance128"));
   }
 }

@@ -27,6 +27,7 @@ import java.util.function.Consumer;
 import javax.annotation.Nullable;
 import org.apache.pinot.common.CustomObject;
 import org.apache.pinot.common.request.context.ExpressionContext;
+import org.apache.pinot.common.request.context.FunctionContext;
 import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
 import org.apache.pinot.core.common.BlockValSet;
 import org.apache.pinot.core.query.aggregation.AggregationResultHolder;
@@ -35,7 +36,8 @@ import org.apache.pinot.core.query.aggregation.groupby.GroupByResultHolder;
 import org.apache.pinot.core.query.aggregation.groupby.ObjectGroupByResultHolder;
 import org.apache.pinot.segment.spi.AggregationFunctionType;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
-import org.apache.pinot.spi.data.FieldSpec;
+import org.apache.pinot.spi.data.FieldSpec.DataType;
+import org.apache.pinot.spi.utils.ByteArray;
 
 
 /// AnyValue aggregation function returns any arbitrary NON-NULL value from the column for each group.
@@ -54,8 +56,8 @@ import org.apache.pinot.spi.data.FieldSpec;
 /// FROM Orders
 /// GROUP BY CustomerID
 /// ```
-public class AnyValueAggregationFunction extends NullableSingleInputAggregationFunction<Object, Comparable<?>> {
-  private static final FieldSpec.DataType[] DATA_TYPE_VALUES = FieldSpec.DataType.values();
+public class AnyValueAggregationFunction extends BaseSingleInputAggregationFunction<Object, Comparable<?>> {
+  private static final DataType[] DATA_TYPE_VALUES = DataType.values();
   // Result type is determined at runtime based on input expression type
   private ColumnDataType _resultType;
 
@@ -208,7 +210,7 @@ public class AnyValueAggregationFunction extends NullableSingleInputAggregationF
   }
 
   /// Get value from dictionary based on data type
-  private Object getDictionaryValue(Dictionary dict, int dictId, FieldSpec.DataType storedType) {
+  private Object getDictionaryValue(Dictionary dict, int dictId, DataType storedType) {
     switch (storedType) {
       case INT:
         return dict.getIntValue(dictId);
@@ -223,7 +225,7 @@ public class AnyValueAggregationFunction extends NullableSingleInputAggregationF
       case BIG_DECIMAL:
         return dict.getBigDecimalValue(dictId);
       case BYTES:
-        return dict.getBytesValue(dictId);
+        return dict.getByteArrayValue(dictId);
       default:
         throw new IllegalStateException("Unsupported dictionary type: " + storedType);
     }
@@ -245,7 +247,7 @@ public class AnyValueAggregationFunction extends NullableSingleInputAggregationF
       case BIG_DECIMAL:
         return bvs.getBigDecimalValuesSV()[index];
       case BYTES:
-        return bvs.getBytesValuesSV()[index];
+        return new ByteArray(bvs.getBytesValuesSV()[index]);
       default:
         throw new IllegalStateException("Unsupported direct access type: " + bvs.getValueType().getStoredType());
     }
@@ -255,26 +257,26 @@ public class AnyValueAggregationFunction extends NullableSingleInputAggregationF
   /// Note: value is never null - null is handled at the serializeIntermediateResult layer
   private byte[] serializeValue(Object value) {
     if (value instanceof Integer) {
-      return serializeFixedValue(FieldSpec.DataType.INT, 4, buffer -> buffer.putInt((Integer) value));
+      return serializeFixedValue(DataType.INT, 4, buffer -> buffer.putInt((Integer) value));
     } else if (value instanceof Long) {
-      return serializeFixedValue(FieldSpec.DataType.LONG, 8, buffer -> buffer.putLong((Long) value));
+      return serializeFixedValue(DataType.LONG, 8, buffer -> buffer.putLong((Long) value));
     } else if (value instanceof Float) {
-      return serializeFixedValue(FieldSpec.DataType.FLOAT, 4, buffer -> buffer.putFloat((Float) value));
+      return serializeFixedValue(DataType.FLOAT, 4, buffer -> buffer.putFloat((Float) value));
     } else if (value instanceof Double) {
-      return serializeFixedValue(FieldSpec.DataType.DOUBLE, 8, buffer -> buffer.putDouble((Double) value));
+      return serializeFixedValue(DataType.DOUBLE, 8, buffer -> buffer.putDouble((Double) value));
     } else if (value instanceof String) {
-      return serializeVariableValue(FieldSpec.DataType.STRING, ((String) value).getBytes(StandardCharsets.UTF_8));
+      return serializeVariableValue(DataType.STRING, ((String) value).getBytes(StandardCharsets.UTF_8));
     } else if (value instanceof BigDecimal) {
-      return serializeVariableValue(FieldSpec.DataType.BIG_DECIMAL, value.toString().getBytes(StandardCharsets.UTF_8));
-    } else if (value instanceof byte[]) {
-      return serializeVariableValue(FieldSpec.DataType.BYTES, (byte[]) value);
+      return serializeVariableValue(DataType.BIG_DECIMAL, value.toString().getBytes(StandardCharsets.UTF_8));
+    } else if (value instanceof ByteArray) {
+      return serializeVariableValue(DataType.BYTES, ((ByteArray) value).getBytes());
     } else {
       throw new IllegalStateException("Unsupported value type for serialization: " + value.getClass().getName());
     }
   }
 
   /// Helper method for serializing fixed-length values
-  private byte[] serializeFixedValue(FieldSpec.DataType dataType, int valueSize, Consumer<ByteBuffer> valueWriter) {
+  private byte[] serializeFixedValue(DataType dataType, int valueSize, Consumer<ByteBuffer> valueWriter) {
     ByteBuffer buffer = ByteBuffer.allocate(4 + valueSize); // 4 bytes for type ordinal + value bytes
     buffer.putInt(dataType.ordinal());
     valueWriter.accept(buffer);
@@ -282,7 +284,7 @@ public class AnyValueAggregationFunction extends NullableSingleInputAggregationF
   }
 
   /// Helper method for serializing variable-length values
-  private byte[] serializeVariableValue(FieldSpec.DataType dataType, byte[] data) {
+  private byte[] serializeVariableValue(DataType dataType, byte[] data) {
     ByteBuffer buffer = ByteBuffer.allocate(8 + data.length); // 4 bytes type ordinal + 4 bytes length + data
     buffer.putInt(dataType.ordinal());
     buffer.putInt(data.length);
@@ -294,7 +296,7 @@ public class AnyValueAggregationFunction extends NullableSingleInputAggregationF
   /// Note: empty buffer (null) is handled at the deserializeIntermediateResult layer
   private Object deserializeValue(ByteBuffer buffer) {
     int typeOrdinal = buffer.getInt();
-    FieldSpec.DataType dataType = DATA_TYPE_VALUES[typeOrdinal];
+    DataType dataType = DATA_TYPE_VALUES[typeOrdinal];
     switch (dataType) {
       case INT:
         return buffer.getInt();
@@ -309,7 +311,7 @@ public class AnyValueAggregationFunction extends NullableSingleInputAggregationF
       case BIG_DECIMAL:
         return new BigDecimal(new String(deserializeVariableBytes(buffer), StandardCharsets.UTF_8));
       case BYTES:
-        return deserializeVariableBytes(buffer);
+        return new ByteArray(deserializeVariableBytes(buffer));
       default:
         throw new IllegalStateException("Unsupported data type for deserialization: " + dataType);
     }
@@ -351,6 +353,19 @@ public class AnyValueAggregationFunction extends NullableSingleInputAggregationF
         return;
       default:
         throw new IllegalStateException("ANY_VALUE unsupported type: " + bvs.getValueType());
+    }
+  }
+
+  /// Service registration for ANY_VALUE.
+  public static final class Provider implements AggregationFunctionProvider {
+    @Override
+    public AggregationFunctionType getType() {
+      return AggregationFunctionType.ANYVALUE;
+    }
+
+    @Override
+    public AggregationFunction<?, ?> create(FunctionContext function, boolean nullHandlingEnabled) {
+      return new AnyValueAggregationFunction(function.getArguments(), nullHandlingEnabled);
     }
   }
 }

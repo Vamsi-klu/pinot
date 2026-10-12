@@ -40,7 +40,6 @@ import org.apache.pinot.core.plan.maker.InstancePlanMakerImplV2;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunctionFactory;
 import org.apache.pinot.core.util.GroupByUtils;
-import org.apache.pinot.core.util.MemoizedClassAssociation;
 import org.apache.pinot.segment.spi.datasource.DataSource;
 import org.apache.pinot.spi.config.table.FieldConfig;
 import org.apache.pinot.spi.data.Schema;
@@ -80,7 +79,9 @@ public class QueryContext {
   private final Map<ExpressionContext, ExpressionContext> _expressionOverrideHints;
   private final ExplainMode _explain;
 
-  private final Function<Class<?>, Map<?, ?>> _sharedValues = MemoizedClassAssociation.of(ConcurrentHashMap::new);
+  // Values that the segments of the query share, by value type. The query context owns the map, so the values can be
+  // collected with it. A ClassValue would keep each value in its type's cache until later queries clear it.
+  private final ConcurrentHashMap<Class<?>, ConcurrentHashMap<?, ?>> _sharedValues = new ConcurrentHashMap<>();
 
   // Pre-calculate the aggregation functions and columns for the query so that it can be shared across all the segments
   private AggregationFunction[] _aggregationFunctions;
@@ -133,6 +134,8 @@ public class QueryContext {
   private int _effectiveSegmentGroupTrimSize;
   // Flush threshold for streaming group-by (0 = disabled)
   private int _streamingGroupByFlushThreshold;
+  // Flush threshold for streaming distinct (0 = disabled)
+  private int _streamingDistinctFlushThreshold;
   // Whether null handling is enabled
   private boolean _nullHandlingEnabled;
   // Whether server returns the final result
@@ -338,7 +341,8 @@ public class QueryContext {
     return _filteredAggregationsIndexMap;
   }
 
-  /// Returns the filtered aggregation expressions for the query.
+  /// Returns whether any aggregation in the query carries a FILTER clause, no matter whether it is referenced in the
+  /// SELECT list, the HAVING clause or the ORDER-BY clause.
   public boolean hasFilteredAggregations() {
     return _hasFilteredAggregations;
   }
@@ -498,6 +502,14 @@ public class QueryContext {
     _streamingGroupByFlushThreshold = streamingGroupByFlushThreshold;
   }
 
+  public int getStreamingDistinctFlushThreshold() {
+    return _streamingDistinctFlushThreshold;
+  }
+
+  public void setStreamingDistinctFlushThreshold(int streamingDistinctFlushThreshold) {
+    _streamingDistinctFlushThreshold = streamingDistinctFlushThreshold;
+  }
+
   public boolean isNullHandlingEnabled() {
     return _nullHandlingEnabled;
   }
@@ -549,7 +561,8 @@ public class QueryContext {
   /// @param <V> the value type
   /// @return the shared value
   public <K, V> V getOrComputeSharedValue(Class<V> type, K key, Function<K, V> mapper) {
-    return ((ConcurrentHashMap<K, V>) _sharedValues.apply(type)).computeIfAbsent(key, mapper);
+    return ((ConcurrentHashMap<K, V>) _sharedValues.computeIfAbsent(type, k -> new ConcurrentHashMap<>()))
+        .computeIfAbsent(key, mapper);
   }
 
   public int getEffectiveSegmentGroupTrimSize() {
@@ -800,9 +813,6 @@ public class QueryContext {
       for (Pair<FunctionContext, FilterContext> pair : filteredAggregations) {
         FunctionContext aggregation = pair.getLeft();
         FilterContext filter = pair.getRight();
-        if (filter != null) {
-          queryContext._hasFilteredAggregations = true;
-        }
         int functionIndex = filteredAggregationFunctions.size();
         AggregationFunction aggregationFunction =
             AggregationFunctionFactory.getAggregationFunction(aggregation, queryContext._nullHandlingEnabled);
@@ -836,7 +846,15 @@ public class QueryContext {
         int numAggregations = filteredAggregationFunctions.size();
         AggregationFunction[] aggregationFunctions = new AggregationFunction[numAggregations];
         for (int i = 0; i < numAggregations; i++) {
-          aggregationFunctions[i] = filteredAggregationFunctions.get(i).getLeft();
+          Pair<AggregationFunction, FilterContext> pair = filteredAggregationFunctions.get(i);
+          aggregationFunctions[i] = pair.getLeft();
+          // NOTE: Compute the flag over all the collected aggregations (SELECT, HAVING and ORDER-BY) instead of only
+          //       the SELECT ones. A FILTER clause on an aggregation that is referenced only in HAVING or ORDER-BY
+          //       must still be honored, else the plan nodes pick the non-filtered operator and silently evaluate the
+          //       aggregation over the main filter alone.
+          if (pair.getRight() != null) {
+            queryContext._hasFilteredAggregations = true;
+          }
         }
         queryContext._aggregationFunctions = aggregationFunctions;
         queryContext._filteredAggregationFunctions = filteredAggregationFunctions;

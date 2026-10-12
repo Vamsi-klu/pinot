@@ -124,6 +124,51 @@ public class LeafOperatorTest {
     return queryRequests;
   }
 
+  private ServerQueryRequest mockQueryRequest(boolean hasSegments) {
+    ServerQueryRequest queryRequest = mock(ServerQueryRequest.class);
+    when(queryRequest.getQueryContext()).thenReturn(mock(QueryContext.class));
+    when(queryRequest.hasSegmentsToQuery()).thenReturn(hasSegments);
+    return queryRequest;
+  }
+
+  private int idleWorkers(List<ServerQueryRequest> requests) {
+    OpChainExecutionContext context = OperatorTestUtil.getTracingContext();
+    DataSchema schema = new DataSchema(new String[]{"intCol"},
+        new DataSchema.ColumnDataType[]{DataSchema.ColumnDataType.INT});
+    try (LeafOperator operator = new LeafOperator(context, requests, schema, mock(QueryExecutor.class),
+        _executorService)) {
+      // Collected more than once, as the runtime does, so a derivation moved onto the shared stat map would show up
+      // here as a doubled count.
+      operator.copyStatMaps();
+      return operator.copyStatMaps().getInt(LeafOperator.StatKey.NON_ACTIVE_WORKERS);
+    }
+  }
+
+  /// A leaf operator is idle on the workers that were given no segment to read. This is decided from the request
+  /// rather than from anything the query produces, so a worker whose segments are all pruned, or all of whose rows
+  /// are filtered out, is not idle.
+  ///
+  /// Which of the request's two segment representations carries them, and that one of them is null, is
+  /// [ServerQueryRequest#hasSegmentsToQuery()]'s business and is stubbed out here.
+  @Test
+  public void shouldNotReportIdleWorkerWhenSegmentsAreAssigned() {
+    assertEquals(idleWorkers(List.of(mockQueryRequest(true))), 0,
+        "expected a worker with a segment assigned not to count as idle");
+  }
+
+  @Test
+  public void shouldReportIdleWorkerWhenNoSegmentIsAssigned() {
+    assertEquals(idleWorkers(List.of(mockQueryRequest(false))), 1,
+        "expected a worker with no segment assigned to be counted as idle");
+  }
+
+  /// A hybrid table produces one request per table type; having segments in either of them is enough.
+  @Test
+  public void shouldNotReportIdleWorkerWhenOnlyTheSecondRequestHasSegments() {
+    assertEquals(idleWorkers(List.of(mockQueryRequest(false), mockQueryRequest(true))), 0,
+        "expected segments on any of the requests to keep the worker out of the idle count");
+  }
+
   @Test
   public void shouldReturnDataBlockThenMetadataBlock() {
     // Given:
@@ -497,6 +542,39 @@ public class LeafOperatorTest {
     assertFalse(responseJson.has("maxRowsWithoutChangeInDistinctReached"));
     assertFalse(responseJson.has("maxExecutionTimeInDistinctReached"));
     assertTrue(responseJson.path("partialResult").asBoolean(false));
+
+    operator.close();
+  }
+
+  @Test
+  public void shouldPropagateRemoteAccessStats() {
+    // Given:
+    DataSchema schema = new DataSchema(new String[]{"intCol"},
+        new DataSchema.ColumnDataType[]{DataSchema.ColumnDataType.INT});
+    InstanceResponseBlock metadataBlock = new InstanceResponseBlock(new MetadataResultsBlock());
+    metadataBlock.getResponseMetadata().put(DataTable.MetadataKey.NUM_REMOTE_ACCESSES.getName(), "7");
+    metadataBlock.getResponseMetadata().put(DataTable.MetadataKey.REMOTE_ACCESS_BYTES.getName(), "700");
+    QueryExecutor queryExecutor = mockQueryExecutor(List.of(), metadataBlock);
+    LeafOperator operator =
+        new LeafOperator(OperatorTestUtil.getTracingContext(), mockQueryRequests(1), schema, queryExecutor,
+            _executorService);
+    _operatorRef.set(operator);
+
+    // When:
+    assertTrue(operator.nextBlock().isEos(), "Expected EOS after reading the metadata block");
+
+    // Then:
+    StatMap<LeafOperator.StatKey> leafStats = operator.copyStatMaps();
+    assertEquals(leafStats.getLong(LeafOperator.StatKey.NUM_REMOTE_ACCESSES), 7L);
+    assertEquals(leafStats.getLong(LeafOperator.StatKey.REMOTE_ACCESS_BYTES), 700L);
+
+    BrokerResponseNativeV2 brokerResponse = new BrokerResponseNativeV2();
+    MultiStageOperator.Type.LEAF.mergeInto(brokerResponse, leafStats);
+    assertEquals(brokerResponse.getNumRemoteAccesses(), 7L);
+    assertEquals(brokerResponse.getRemoteAccessBytes(), 700L);
+    JsonNode responseJson = JsonUtils.objectToJsonNode(brokerResponse);
+    assertEquals(responseJson.path("numRemoteAccesses").asLong(), 7L);
+    assertEquals(responseJson.path("remoteAccessBytes").asLong(), 700L);
 
     operator.close();
   }
