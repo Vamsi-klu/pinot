@@ -24,8 +24,10 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.apache.commons.io.FileUtils;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
 import org.apache.hc.client5.http.entity.mime.FileBody;
@@ -38,6 +40,7 @@ import org.apache.hc.core5.http.io.entity.EntityUtils;
 import org.apache.pinot.client.admin.PinotAdminClient;
 import org.apache.pinot.controller.ControllerConf;
 import org.apache.pinot.controller.helix.ControllerTest;
+import org.apache.pinot.core.realtime.impl.fakestream.FakeStreamConfigUtils;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.data.FieldSpec;
@@ -58,7 +61,10 @@ import static org.testng.Assert.assertTrue;
 public class PinotIngestionRestletResourceStatelessTest extends ControllerTest {
   private static final String TABLE_NAME = "testTable";
   private static final String TABLE_NAME_WITH_TYPE = "testTable_OFFLINE";
+  private static final String REALTIME_TABLE_NAME = "testRealtimeTable";
+  private static final String REALTIME_TABLE_NAME_WITH_TYPE = "testRealtimeTable_REALTIME";
   private File _inputFile;
+  private File _realtimeInputFile;
 
   @BeforeClass
   public void setUp()
@@ -76,6 +82,18 @@ public class PinotIngestionRestletResourceStatelessTest extends ControllerTest {
     _helixResourceManager.addSchema(schema, true, false);
     _helixResourceManager.addTable(tableConfig);
 
+    Schema realtimeSchema = new Schema.SchemaBuilder().setSchemaName(REALTIME_TABLE_NAME)
+        .addSingleValueDimension("breed", FieldSpec.DataType.STRING)
+        .addSingleValueDimension("name", FieldSpec.DataType.STRING)
+        .addDateTime("ts", FieldSpec.DataType.LONG, "1:MILLISECONDS:EPOCH", "1:MILLISECONDS")
+        .build();
+    TableConfig realtimeTableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(REALTIME_TABLE_NAME)
+        .setTimeColumnName("ts")
+        .setStreamConfigs(FakeStreamConfigUtils.getDefaultLowLevelStreamConfigs().getStreamConfigsMap())
+        .build();
+    _helixResourceManager.addSchema(realtimeSchema, true, false);
+    _helixResourceManager.addTable(realtimeTableConfig);
+
     // Create a file with few records
     _inputFile = new File(FileUtils.getTempDirectory(), "pinotIngestionRestletResourceTest_data.csv");
     try (BufferedWriter bw = new BufferedWriter(new FileWriter(_inputFile))) {
@@ -83,6 +101,14 @@ public class PinotIngestionRestletResourceStatelessTest extends ControllerTest {
       bw.write("dog|cooper\n");
       bw.write("cat|kylo\n");
       bw.write("dog|cookie\n");
+    }
+
+    _realtimeInputFile = new File(FileUtils.getTempDirectory(), "pinotIngestionRestletResourceTest_realtime.csv");
+    try (BufferedWriter bw = new BufferedWriter(new FileWriter(_realtimeInputFile))) {
+      bw.write("breed|name|ts\n");
+      bw.write("dog|cooper|1700000000000\n");
+      bw.write("cat|kylo|1700000001000\n");
+      bw.write("dog|cookie|1700000002000\n");
     }
   }
 
@@ -141,6 +167,41 @@ public class PinotIngestionRestletResourceStatelessTest extends ControllerTest {
     assertTrue(ingestionDir.exists());
   }
 
+  @Test
+  public void testIngestEndpointRealtimeTable()
+      throws Exception {
+    PinotAdminClient adminClient = getOrCreateAdminClient();
+    // LLC table setup already creates one CONSUMING segment per stream partition.
+    Set<String> before = new HashSet<>(_helixResourceManager.getSegmentsFor(REALTIME_TABLE_NAME_WITH_TYPE, false));
+    assertFalse(before.isEmpty());
+
+    Map<String, String> batchConfigMap = new HashMap<>();
+    batchConfigMap.put(BatchConfigProperties.INPUT_FORMAT, "csv");
+    batchConfigMap.put(String.format("%s.delimiter", BatchConfigProperties.RECORD_READER_PROP_PREFIX), "|");
+    assertEquals(
+        adminClient.getFileIngestClient()
+            .ingestFromFile(REALTIME_TABLE_NAME_WITH_TYPE, batchConfigMap, _realtimeInputFile),
+        200);
+    Set<String> afterFile = new HashSet<>(_helixResourceManager.getSegmentsFor(REALTIME_TABLE_NAME_WITH_TYPE, false));
+    afterFile.removeAll(before);
+    assertEquals(afterFile.size(), 1);
+
+    Set<String> afterFirstIngest =
+        new HashSet<>(_helixResourceManager.getSegmentsFor(REALTIME_TABLE_NAME_WITH_TYPE, false));
+    _controllerConfig.setProperty(ControllerConf.INGEST_FROM_URI_ALLOW_LOCAL_FILE_SYSTEM, true);
+    try {
+      assertEquals(adminClient.getFileIngestClient()
+              .ingestFromUri(REALTIME_TABLE_NAME_WITH_TYPE, batchConfigMap,
+                  String.format("file://%s", _realtimeInputFile.getAbsolutePath()), _realtimeInputFile),
+          200);
+      Set<String> afterUri = new HashSet<>(_helixResourceManager.getSegmentsFor(REALTIME_TABLE_NAME_WITH_TYPE, false));
+      afterUri.removeAll(afterFirstIngest);
+      assertEquals(afterUri.size(), 1);
+    } finally {
+      _controllerConfig.setProperty(ControllerConf.INGEST_FROM_URI_ALLOW_LOCAL_FILE_SYSTEM, false);
+    }
+  }
+
   private String sendHttpPost(String uri, int expectedStatusCode)
       throws IOException {
     HttpPost httpPost = new HttpPost(uri);
@@ -165,6 +226,7 @@ public class PinotIngestionRestletResourceStatelessTest extends ControllerTest {
   @AfterClass
   public void tearDown() {
     FileUtils.deleteQuietly(_inputFile);
+    FileUtils.deleteQuietly(_realtimeInputFile);
     stopFakeInstances();
     stopController();
     stopZk();
