@@ -56,6 +56,15 @@ public class IngestionConfig extends BaseJsonConfig {
   @JsonPropertyDescription("Configs related to record aggregation function applied during ingestion")
   private List<AggregationConfig> _aggregationConfigs;
 
+  @JsonPropertyDescription("When true, convert ingestion-aggregation source columns that are not in the schema "
+      + "(and not already covered by sourceFieldConfigs) before indexing. Inferred types are aggregator input "
+      + "types (SUM/MIN/MAX/AVG/MINMAXRANGE -> DOUBLE, SUMMV/AVGMV -> DOUBLE_ARRAY, SUMPRECISION -> BIG_DECIMAL), "
+      + "never the destination stored type. A source is converted only when no identity-sensitive aggregation "
+      + "(HLL, sketch, bitmap) reads it. COUNT does not veto a sibling numeric rewrite. Table-create rejects a "
+      + "SourceFieldConfig that names a column also read by an identity-sensitive aggregation. Off by default "
+      + "to avoid per-record conversion overhead when source values are already aggregator-compatible.")
+  private boolean _convertAggregationSourceTypes;
+
   @JsonPropertyDescription("Configs related to skip any row which has error and continue during ingestion")
   private boolean _continueOnError;
 
@@ -119,6 +128,10 @@ public class IngestionConfig extends BaseJsonConfig {
   @Nullable
   public List<AggregationConfig> getAggregationConfigs() {
     return _aggregationConfigs;
+  }
+
+  public boolean isConvertAggregationSourceTypes() {
+    return _convertAggregationSourceTypes;
   }
 
   public boolean isContinueOnError() {
@@ -187,6 +200,10 @@ public class IngestionConfig extends BaseJsonConfig {
 
   public void setAggregationConfigs(List<AggregationConfig> aggregationConfigs) {
     _aggregationConfigs = aggregationConfigs;
+  }
+
+  public void setConvertAggregationSourceTypes(boolean convertAggregationSourceTypes) {
+    _convertAggregationSourceTypes = convertAggregationSourceTypes;
   }
 
   public void setContinueOnError(boolean continueOnError) {
