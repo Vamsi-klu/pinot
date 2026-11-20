@@ -19,7 +19,6 @@
 package org.apache.pinot.segment.local.startree;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.google.common.base.Utf8;
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteOrder;
@@ -51,6 +50,7 @@ import org.apache.pinot.segment.spi.utils.SegmentMetadataUtils;
 import org.apache.pinot.spi.config.table.StarTreeIndexConfig;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.utils.CommonConstants;
+import org.apache.pinot.spi.utils.Utf8Utils;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
@@ -147,7 +147,7 @@ public class StarTreeBuilderUtils {
     for (String dimension : dimensions) {
       headerSizeInBytes += Integer.BYTES; // For dimension index
       headerSizeInBytes += Integer.BYTES; // For length of dimension name
-      headerSizeInBytes += Utf8.encodedLength(dimension); // For dimension name
+      headerSizeInBytes += Utf8Utils.encodedLength(dimension); // For dimension name
     }
 
     headerSizeInBytes += Integer.BYTES; // For number of nodes.
@@ -319,6 +319,29 @@ public class StarTreeBuilderUtils {
       }
     }
     return dimensions;
+  }
+
+  /// Returns `true` if any existing star-tree uses one of the given columns as a dimension or aggregation input.
+  /// COUNT(*) (`*`) is ignored. Used to force a rebuild when derived-column values change but star-tree config does
+  /// not.
+  public static boolean usesAnyColumn(@Nullable List<StarTreeV2Metadata> metadataList, Set<String> columns) {
+    if (metadataList == null || columns.isEmpty()) {
+      return false;
+    }
+    for (StarTreeV2Metadata metadata : metadataList) {
+      for (String dimension : metadata.getDimensionsSplitOrder()) {
+        if (columns.contains(dimension)) {
+          return true;
+        }
+      }
+      for (AggregationFunctionColumnPair pair : metadata.getFunctionColumnPairs()) {
+        String column = pair.getColumn();
+        if (!AggregationFunctionColumnPair.STAR.equals(column) && columns.contains(column)) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   /// Returns `true` if the given star-tree builder configs are equal, `false` otherwise.
