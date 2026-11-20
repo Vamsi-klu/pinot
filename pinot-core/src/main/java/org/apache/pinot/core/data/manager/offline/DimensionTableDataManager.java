@@ -100,6 +100,7 @@ public class DimensionTableDataManager extends OfflineTableDataManager {
 
   private boolean _disablePreload;
   private boolean _errorOnDuplicatePrimaryKey = false;
+  private boolean _enableUpsert = true;
 
   @Override
   protected void doInit() {
@@ -118,6 +119,7 @@ public class DimensionTableDataManager extends OfflineTableDataManager {
     if (dimensionTableConfig != null) {
       _disablePreload = dimensionTableConfig.isDisablePreload();
       _errorOnDuplicatePrimaryKey = dimensionTableConfig.isErrorOnDuplicatePrimaryKey();
+      _enableUpsert = dimensionTableConfig.isEnableUpsert();
     }
 
     if (_disablePreload) {
@@ -205,8 +207,9 @@ public class DimensionTableDataManager extends OfflineTableDataManager {
         "Primary key columns must be configured for dimension table: %s", _tableNameWithType);
 
     List<SegmentDataManager> segmentDataManagers = acquireAllSegments();
+    // Sort so first-wins / last-wins is deterministic across servers (CHM iteration is not).
     if (!_errorOnDuplicatePrimaryKey) {
-      sortSegmentsForUpsert(segmentDataManagers);
+      sortSegmentsForLookup(segmentDataManagers);
     }
     try {
       // count all documents to limit map re-sizings
@@ -239,7 +242,12 @@ public class DimensionTableDataManager extends OfflineTableDataManager {
               Object[] primaryKey = recordReader.getPrimaryKeys(i);
               Object[] values = recordReader.getRecordValues(i, valIndexes);
 
-              Object[] previousValue = lookupTable.put(primaryKey, values);
+              Object[] previousValue;
+              if (_enableUpsert) {
+                previousValue = lookupTable.put(primaryKey, values);
+              } else {
+                previousValue = lookupTable.putIfAbsent(primaryKey, values);
+              }
               if (_errorOnDuplicatePrimaryKey && previousValue != null) {
                 throw new IllegalStateException(
                     "Caught exception while reading records from segment: " + indexSegment.getSegmentName()
@@ -283,7 +291,7 @@ public class DimensionTableDataManager extends OfflineTableDataManager {
 
     List<SegmentDataManager> segmentDataManagers = acquireAllSegments();
     if (!_errorOnDuplicatePrimaryKey) {
-      sortSegmentsForUpsert(segmentDataManagers);
+      sortSegmentsForLookup(segmentDataManagers);
     }
     List<PinotSegmentRecordReader> recordReaders = new ArrayList<>(segmentDataManagers.size());
 
@@ -316,7 +324,12 @@ public class DimensionTableDataManager extends OfflineTableDataManager {
             Object[] primaryKey = recordReader.getPrimaryKeys(i);
 
             long readerIdxAndDocId = (((long) readerIdx) << 32) | (i & 0xffffffffL);
-            long previousValue = lookupTable.put(primaryKey, readerIdxAndDocId);
+            long previousValue;
+            if (_enableUpsert) {
+              previousValue = lookupTable.put(primaryKey, readerIdxAndDocId);
+            } else {
+              previousValue = lookupTable.putIfAbsent(primaryKey, readerIdxAndDocId);
+            }
             if (_errorOnDuplicatePrimaryKey && previousValue != Long.MIN_VALUE) {
               throw new IllegalStateException(
                   "Caught exception while reading records from segment: " + indexSegment.getSegmentName()
@@ -333,7 +346,7 @@ public class DimensionTableDataManager extends OfflineTableDataManager {
         this);
   }
 
-  private void sortSegmentsForUpsert(List<SegmentDataManager> segmentDataManagers) {
+  private void sortSegmentsForLookup(List<SegmentDataManager> segmentDataManagers) {
     segmentDataManagers.sort(Comparator
         .comparingLong((SegmentDataManager segmentDataManager) -> segmentDataManager.getSegment().getSegmentMetadata()
             .getIndexCreationTime())
@@ -353,6 +366,11 @@ public class DimensionTableDataManager extends OfflineTableDataManager {
     for (SegmentDataManager dataManager : segmentDataManagers) {
       releaseSegment(dataManager);
     }
+  }
+
+  @VisibleForTesting
+  boolean isLookupUpsertEnabled() {
+    return _enableUpsert;
   }
 
   public boolean isPopulated() {

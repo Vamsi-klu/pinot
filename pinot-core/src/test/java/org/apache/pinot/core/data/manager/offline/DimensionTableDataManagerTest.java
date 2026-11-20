@@ -24,6 +24,7 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.Executors;
 import org.apache.commons.io.FileUtils;
@@ -148,7 +149,13 @@ public class DimensionTableDataManagerTest {
   }
 
   private TableConfig getTableConfig(boolean disablePreload, boolean errorOnDuplicatePrimaryKey) {
-    DimensionTableConfig dimensionTableConfig = new DimensionTableConfig(disablePreload, errorOnDuplicatePrimaryKey);
+    return getTableConfig(disablePreload, errorOnDuplicatePrimaryKey, null);
+  }
+
+  private TableConfig getTableConfig(boolean disablePreload, boolean errorOnDuplicatePrimaryKey,
+      Boolean enableUpsert) {
+    DimensionTableConfig dimensionTableConfig =
+        new DimensionTableConfig(disablePreload, errorOnDuplicatePrimaryKey, enableUpsert);
     return new TableConfigBuilder(TableType.OFFLINE)
         .setTableName("dimBaseballTeams")
         .setDimensionTableConfig(dimensionTableConfig)
@@ -181,6 +188,10 @@ public class DimensionTableDataManagerTest {
   private DimensionTableDataManager makeTableDataManager(TableConfig tableConfig, Schema schema,
       ZkHelixPropertyStore<ZNRecord> propertyStoreMock)
       throws JsonProcessingException {
+    DimensionTableDataManager existing = DimensionTableDataManager.getInstanceByTableName(OFFLINE_TABLE_NAME);
+    if (existing != null) {
+      existing.shutDown();
+    }
     HelixManager helixManager = mock(HelixManager.class);
     when(propertyStoreMock.get("/CONFIGS/TABLE/dimBaseballTeams_OFFLINE", null, AccessOption.PERSISTENT)).thenReturn(
         TableConfigSerDeUtils.toZNRecord(tableConfig));
@@ -421,6 +432,54 @@ public class DimensionTableDataManagerTest {
     InputStream inputStream = new FileInputStream(schemaFile);
     Assert.assertNotNull(inputStream);
     return JsonUtils.inputStreamToObject(inputStream, Schema.class);
+  }
+
+  @Test
+  public void testLookupUpsertOverwritesDuplicatePrimaryKey()
+      throws Exception {
+    TableConfig tableConfig = getTableConfig(false, false, true);
+    Schema schema = getSchema();
+    DimensionTableDataManager tableDataManager = makeTableDataManager(tableConfig, schema);
+    assertTrue(tableDataManager.isLookupUpsertEnabled());
+    tableDataManager.addSegment(ImmutableSegmentLoader.load(_indexDir, new IndexLoadingConfig(tableConfig, schema),
+        SEGMENT_OPERATIONS_THROTTLER));
+
+    PrimaryKey key = new PrimaryKey(new String[]{"SF"});
+    GenericRow original = tableDataManager.lookupRow(key);
+    assertNotNull(original);
+    assertEquals(original.getValue("teamName"), "San Francisco Giants");
+
+    File updatedCsv = new File(TEMP_DIR, "dimBaseballTeams_updated.csv");
+    FileUtils.write(updatedCsv, "teamID,teamName\nSF,San Francisco Seals\n", StandardCharsets.UTF_8);
+    File updatedTableDir = new File(TEMP_DIR, "updatedTable");
+    SegmentGeneratorConfig updatedConfig =
+        SegmentTestUtils.getSegmentGeneratorConfig(updatedCsv, FileFormat.CSV, updatedTableDir, RAW_TABLE_NAME,
+            tableConfig, schema);
+    updatedConfig.setCreationTime(String.valueOf(System.currentTimeMillis() + 86_400_000L));
+    SegmentIndexCreationDriver updatedDriver = new SegmentIndexCreationDriverImpl();
+    updatedDriver.init(updatedConfig);
+    updatedDriver.build();
+    File updatedIndexDir = new File(updatedTableDir, updatedDriver.getSegmentName());
+
+    tableDataManager.addSegment(
+        ImmutableSegmentLoader.load(updatedIndexDir, new IndexLoadingConfig(tableConfig, schema),
+            SEGMENT_OPERATIONS_THROTTLER));
+
+    GenericRow upserted = tableDataManager.lookupRow(key);
+    assertNotNull(upserted);
+    assertEquals(upserted.getValue("teamName"), "San Francisco Seals");
+  }
+
+  @Test
+  public void testEnableUpsertFalseIsHonoredOnBothLoaders()
+      throws Exception {
+    TableConfig fast = getTableConfig(false, false, false);
+    DimensionTableDataManager fastManager = makeTableDataManager(fast, getSchema());
+    assertFalse(fastManager.isLookupUpsertEnabled());
+
+    TableConfig mem = getTableConfig(true, false, false);
+    DimensionTableDataManager memManager = makeTableDataManager(mem, getSchema());
+    assertFalse(memManager.isLookupUpsertEnabled());
   }
 
   protected static TableConfig createTableConfig(File tableConfigFile)
